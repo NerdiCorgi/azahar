@@ -13,6 +13,8 @@
 #include <string>
 #include <string_view>
 
+#include <fmt/format.h>
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -31,6 +33,7 @@
 #include "core/frontend/applets/default_applets.h"
 #include "core/hle/service/service.h"
 #include "core/loader/loader.h"
+#include "core/movie.h"
 #include "input_common/main.h"
 #include "video_core/gpu.h"
 
@@ -314,75 +317,114 @@ bool WaitForAsyncOperationsToDrain(Core::System& system) {
     return true;
 }
 
-std::vector<u8> ReadFileBytes(const std::string& path) {
-    FileUtil::IOFile file(path, "rb");
-    if (!file) {
-        throw std::runtime_error("Could not open file " + path);
+constexpr u32 RetroCorgiNativeSaveStateSlot = 99;
+
+struct PendingRetroCorgiStateRequest {
+    InputCommon::RetroCorgiIPC::StateRequest request;
+    std::string native_path;
+};
+
+std::string GetNativeSaveStatePath(u64 program_id, u64 movie_id, u32 slot) {
+    if (movie_id) {
+        return fmt::format("{}{:016X}.movie{:016X}.{:02d}.cst",
+                           FileUtil::GetUserPath(FileUtil::UserPath::StatesDir), program_id,
+                           movie_id, slot);
     }
 
-    const auto size = FileUtil::GetSize(path);
-    if (size <= 0) {
-        throw std::runtime_error("Could not read save-state file " + path);
-    }
-
-    std::vector<u8> buffer(static_cast<std::size_t>(size));
-    if (file.ReadBytes(buffer.data(), buffer.size()) != buffer.size()) {
-        throw std::runtime_error("Could not read file " + path);
-    }
-    return buffer;
+    return fmt::format("{}{:016X}.{:02d}.cst",
+                       FileUtil::GetUserPath(FileUtil::UserPath::StatesDir), program_id, slot);
 }
 
-std::size_t WriteFileBytes(const std::string& path, const std::vector<u8>& buffer) {
+void EnsureStateFileParentPath(const std::string& path) {
     if (!FileUtil::CreateFullPath(path)) {
         throw std::runtime_error("Could not create path " + path);
     }
-
-    FileUtil::IOFile file(path, "wb");
-    if (!file) {
-        throw std::runtime_error("Could not open file " + path);
-    }
-    if (file.WriteBytes(buffer.data(), buffer.size()) != buffer.size()) {
-        throw std::runtime_error("Could not write file " + path);
-    }
-    return buffer.size();
 }
 
-void DrainRetroCorgiStateRequests(Core::System& system) {
-    while (true) {
-        const auto request = InputCommon::PopRetroCorgiIPCRequest();
-        if (!request.has_value()) {
+std::size_t GetRequiredFileSize(const std::string& path) {
+    if (!FileUtil::Exists(path)) {
+        throw std::runtime_error("Could not open file " + path);
+    }
+
+    return static_cast<std::size_t>(FileUtil::GetSize(path));
+}
+
+std::optional<PendingRetroCorgiStateRequest> BeginRetroCorgiStateRequest(Core::System& system,
+                                                                         u64 program_id) {
+    const auto request = InputCommon::PopRetroCorgiIPCRequest();
+    if (!request.has_value()) {
+        return std::nullopt;
+    }
+
+    try {
+        if (!system.IsPoweredOn()) {
+            throw std::runtime_error("System is not powered on");
+        }
+        if (!system.GetAppLoader().SupportsSaveStates()) {
+            throw std::runtime_error("The current app loader doesn't support save states");
+        }
+        if (!WaitForAsyncOperationsToDrain(system)) {
+            throw std::runtime_error("Timed out waiting for async operations to complete");
+        }
+
+        const std::string native_path = GetNativeSaveStatePath(
+            program_id, system.Movie().GetCurrentMovieID(), RetroCorgiNativeSaveStateSlot);
+
+        if (request->type == InputCommon::RetroCorgiIPC::StateRequest::Type::SaveState) {
+            if (FileUtil::Exists(native_path) && !FileUtil::Delete(native_path)) {
+                throw std::runtime_error("Could not remove stale native save-state file " +
+                                         native_path);
+            }
+            if (!system.SendSignal(Core::System::Signal::Save, RetroCorgiNativeSaveStateSlot)) {
+                throw std::runtime_error("Could not queue native save-state operation");
+            }
+            return PendingRetroCorgiStateRequest{*request, native_path};
+        }
+
+        EnsureStateFileParentPath(native_path);
+        if (!FileUtil::Copy(request->path, native_path)) {
+            throw std::runtime_error("Could not copy save-state file to native slot");
+        }
+        if (!system.SendSignal(Core::System::Signal::Load, RetroCorgiNativeSaveStateSlot)) {
+            throw std::runtime_error("Could not queue native load-state operation");
+        }
+        return PendingRetroCorgiStateRequest{*request, native_path};
+    } catch (const std::exception& exception) {
+        InputCommon::CompleteRetroCorgiIPCRequest(*request, false, 0, exception.what());
+        return std::nullopt;
+    }
+}
+
+void CompleteRetroCorgiStateRequest(const PendingRetroCorgiStateRequest& pending,
+                                    Core::System::ResultStatus result,
+                                    const Core::System& system) {
+    try {
+        if (result != Core::System::ResultStatus::Success) {
+            const auto& details = system.GetStatusDetails();
+            InputCommon::CompleteRetroCorgiIPCRequest(
+                pending.request, false, 0,
+                details.empty() ? "Native save-state operation failed" : details);
             return;
         }
 
-        try {
-            if (!system.IsPoweredOn()) {
-                throw std::runtime_error("System is not powered on");
+        if (pending.request.type == InputCommon::RetroCorgiIPC::StateRequest::Type::SaveState) {
+            EnsureStateFileParentPath(pending.request.path);
+            if (!FileUtil::Copy(pending.native_path, pending.request.path)) {
+                throw std::runtime_error("Could not copy native save-state file to request path");
             }
-            if (!system.GetAppLoader().SupportsSaveStates()) {
-                throw std::runtime_error("The current app loader doesn't support save states");
-            }
-            if (!WaitForAsyncOperationsToDrain(system)) {
-                throw std::runtime_error("Timed out waiting for async operations to complete");
-            }
-
-            if (request->type == InputCommon::RetroCorgiIPC::StateRequest::Type::SaveState) {
-                const auto buffer = system.SaveStateBuffer();
-                const auto bytes = WriteFileBytes(request->path, buffer);
-                InputCommon::CompleteRetroCorgiIPCRequest(*request, true, bytes,
-                                                          "save-state completed");
-                continue;
-            }
-
-            auto buffer = ReadFileBytes(request->path);
-            const auto bytes = buffer.size();
-            if (!system.LoadStateBuffer(std::move(buffer))) {
-                throw std::runtime_error("Invalid save-state buffer");
-            }
-            InputCommon::CompleteRetroCorgiIPCRequest(*request, true, bytes,
-                                                      "load-state completed");
-        } catch (const std::exception& exception) {
-            InputCommon::CompleteRetroCorgiIPCRequest(*request, false, 0, exception.what());
         }
+
+        const auto bytes = pending.request.type ==
+                                   InputCommon::RetroCorgiIPC::StateRequest::Type::SaveState
+                               ? GetRequiredFileSize(pending.native_path)
+                               : GetRequiredFileSize(pending.request.path);
+        InputCommon::CompleteRetroCorgiIPCRequest(
+            pending.request, true, bytes,
+            pending.request.type == InputCommon::RetroCorgiIPC::StateRequest::Type::SaveState
+                ? "save-state completed"
+                : "load-state completed");
+    } catch (const std::exception& exception) {
+        InputCommon::CompleteRetroCorgiIPCRequest(pending.request, false, 0, exception.what());
     }
 }
 
@@ -554,13 +596,24 @@ int main(int argc, char* argv[]) {
     system.GetAppLoader().ReadProgramId(program_id);
     system.GPU().ApplyPerProgramSettings(program_id);
 
+    std::optional<PendingRetroCorgiStateRequest> pending_state_request;
+
     const auto deadline = run_for.has_value() ? std::optional{std::chrono::steady_clock::now() + *run_for}
                                                : std::optional<std::chrono::steady_clock::time_point>{};
 
     while (!deadline.has_value() || std::chrono::steady_clock::now() < *deadline) {
         window.PollEvents();
-        DrainRetroCorgiStateRequests(system);
+        if (!pending_state_request.has_value()) {
+            pending_state_request = BeginRetroCorgiStateRequest(system, program_id);
+        }
         const auto result = system.RunLoop();
+        if (pending_state_request.has_value()) {
+            CompleteRetroCorgiStateRequest(*pending_state_request, result, system);
+            pending_state_request.reset();
+            if (result == Core::System::ResultStatus::Success) {
+                continue;
+            }
+        }
         if (result == Core::System::ResultStatus::Success) {
             continue;
         }

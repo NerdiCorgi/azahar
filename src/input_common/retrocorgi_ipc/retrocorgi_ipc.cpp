@@ -17,6 +17,7 @@
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <vector>
 #include <boost/asio.hpp>
 #include "common/param_package.h"
 #include "common/logging/log.h"
@@ -147,21 +148,32 @@ public:
     void Stop() {
         stopping.store(true);
 
-        std::shared_ptr<tcp::socket> socket_to_close;
+        std::vector<std::shared_ptr<SharedState::ConnectionState>> connections_to_close;
         {
-            std::lock_guard guard(socket_mutex);
-            socket_to_close = active_socket;
+            std::lock_guard guard(connection_mutex);
+            connections_to_close = connections;
         }
 
         boost::system::error_code ec;
         acceptor.cancel(ec);
         acceptor.close(ec);
-        if (socket_to_close) {
-            socket_to_close->close(ec);
+        for (const auto& connection : connections_to_close) {
+            CloseConnection(connection);
         }
         io_context.stop();
         if (thread.joinable()) {
             thread.join();
+        }
+
+        std::vector<std::thread> workers;
+        {
+            std::lock_guard guard(worker_mutex);
+            workers.swap(worker_threads);
+        }
+        for (auto& worker : workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
         }
     }
 
@@ -199,52 +211,71 @@ private:
         //   reset
         // One command is processed per newline. Unknown or malformed lines are ignored.
         while (!stopping.load()) {
-             auto socket = std::make_shared<tcp::socket>(io_context);
-             auto connection = std::make_shared<SharedState::ConnectionState>(socket);
-             {
-                 std::lock_guard guard(socket_mutex);
-                 active_socket = socket;
-            }
+            auto socket = std::make_shared<tcp::socket>(io_context);
 
             acceptor.accept(*socket, ec);
             if (ec) {
-                {
-                    std::lock_guard guard(socket_mutex);
-                    if (active_socket == socket) {
-                        active_socket.reset();
-                    }
-                }
                 if (!stopping.load()) {
                     LOG_WARNING(Input, "retrocorgi_ipc accept failed: {}", ec.message());
                 }
                 continue;
             }
 
-            boost::asio::streambuf buffer;
-            while (!stopping.load()) {
-                boost::asio::read_until(*socket, buffer, '\n', ec);
-                if (ec) {
-                    break;
-                }
-
-                std::istream input(&buffer);
-                std::string line;
-                 std::getline(input, line);
-                 if (!line.empty() && line.back() == '\r') {
-                     line.pop_back();
-                 }
-                 HandleLine(line, connection);
-             }
-
-             connection->open.store(false);
-             socket->close(ec);
-             {
-                 std::lock_guard guard(socket_mutex);
-                if (active_socket == socket) {
-                    active_socket.reset();
-                }
+            auto connection = std::make_shared<SharedState::ConnectionState>(std::move(socket));
+            RegisterConnection(connection);
+            {
+                std::lock_guard guard(worker_mutex);
+                worker_threads.emplace_back([this, connection] { HandleConnection(connection); });
             }
         }
+    }
+
+    void HandleConnection(const std::shared_ptr<SharedState::ConnectionState>& connection) {
+        boost::asio::streambuf buffer;
+        boost::system::error_code ec;
+
+        while (!stopping.load() && connection->open.load()) {
+            boost::asio::read_until(*connection->socket, buffer, '\n', ec);
+            if (ec) {
+                break;
+            }
+
+            std::istream input(&buffer);
+            std::string line;
+            std::getline(input, line);
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            HandleLine(line, connection);
+        }
+
+        CloseConnection(connection);
+        UnregisterConnection(connection);
+    }
+
+    void RegisterConnection(const std::shared_ptr<SharedState::ConnectionState>& connection) {
+        std::lock_guard guard(connection_mutex);
+        connections.push_back(connection);
+    }
+
+    void UnregisterConnection(const std::shared_ptr<SharedState::ConnectionState>& connection) {
+        std::lock_guard guard(connection_mutex);
+        std::erase(connections, connection);
+    }
+
+    void CloseConnection(const std::shared_ptr<SharedState::ConnectionState>& connection) {
+        if (!connection) {
+            return;
+        }
+
+        connection->open.store(false);
+        if (!connection->socket) {
+            return;
+        }
+
+        boost::system::error_code ec;
+        connection->socket->shutdown(tcp::socket::shutdown_both, ec);
+        connection->socket->close(ec);
     }
 
     void HandleLine(const std::string& line,
@@ -341,8 +372,10 @@ private:
     tcp::endpoint endpoint;
     tcp::acceptor acceptor{io_context};
     std::atomic_bool stopping{false};
-    std::mutex socket_mutex;
-    std::shared_ptr<tcp::socket> active_socket;
+    std::mutex connection_mutex;
+    std::vector<std::shared_ptr<SharedState::ConnectionState>> connections;
+    std::mutex worker_mutex;
+    std::vector<std::thread> worker_threads;
     std::thread thread;
 };
 
