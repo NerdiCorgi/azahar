@@ -48,6 +48,7 @@ void PrintUsage(const char* program_name) {
               << "  --user-dir <path>         Use the specified Azahar user directory\n"
               << "  --new-3ds <old|new|auto>  Set system mode before loading the ROM\n"
               << "                             auto keeps the existing setting\n"
+              << "  --renderer <backend>     Use software or Vulkan rendering (default: software)\n"
               << "  --raw-video-stdout        Write composed 400x480 yuv420p frames to stdout\n"
               << "  --raw-video-fps <n>       Cap raw video stdout to 1..60 frames per second\n"
               << "  --audio-tcp-port <port>   Stream PCM16 stereo audio on 127.0.0.1:<port>\n";
@@ -105,6 +106,27 @@ bool ParseNew3dsMode(int argc, char* argv[], int& index, New3dsMode& new_3ds_mod
         new_3ds_mode = New3dsMode::Old;
     } else if (mode == "new") {
         new_3ds_mode = New3dsMode::New;
+    } else {
+        return false;
+    }
+
+    ++index;
+    return true;
+}
+
+bool ParseRenderer(int argc, char* argv[], int& index, Settings::GraphicsAPI& graphics_api) {
+    if (std::string_view(argv[index]) != "--renderer") {
+        return true;
+    }
+    if (index + 1 >= argc) {
+        return false;
+    }
+
+    const std::string_view backend = argv[index + 1];
+    if (backend == "software") {
+        graphics_api = Settings::GraphicsAPI::Software;
+    } else if (backend == "vulkan") {
+        graphics_api = Settings::GraphicsAPI::Vulkan;
     } else {
         return false;
     }
@@ -239,6 +261,7 @@ int main(int argc, char* argv[]) {
     std::optional<u16> audio_tcp_port;
     std::optional<int> raw_video_fps;
     New3dsMode new_3ds_mode = New3dsMode::Auto;
+    Settings::GraphicsAPI graphics_api = Settings::GraphicsAPI::Software;
     bool raw_video_stdout_enabled = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--seconds") {
@@ -259,6 +282,14 @@ int main(int argc, char* argv[]) {
 
         if (std::string_view(argv[i]) == "--new-3ds") {
             if (!ParseNew3dsMode(argc, argv, i, new_3ds_mode)) {
+                PrintUsage(argv[0]);
+                return 1;
+            }
+            continue;
+        }
+
+        if (std::string_view(argv[i]) == "--renderer") {
+            if (!ParseRenderer(argc, argv, i, graphics_api)) {
                 PrintUsage(argv[0]);
                 return 1;
             }
@@ -325,7 +356,7 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    Settings::values.graphics_api = Settings::GraphicsAPI::Software;
+    Settings::values.graphics_api = graphics_api;
     Settings::values.output_type = audio_tcp_port.has_value() ? AudioCore::SinkType::TCP
                                                               : AudioCore::SinkType::Null;
     if (audio_tcp_port.has_value()) {
