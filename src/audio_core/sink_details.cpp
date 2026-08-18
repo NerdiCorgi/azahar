@@ -3,11 +3,13 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
 #include "audio_core/null_sink.h"
 #include "audio_core/sink_details.h"
+#include "audio_core/tcp_sink.h"
 #ifdef HAVE_SDL2
 #include "audio_core/sdl2_sink.h"
 #endif
@@ -24,6 +26,12 @@
 
 namespace AudioCore {
 namespace {
+const SinkDetails tcp_sink_details{SinkType::TCP, "TCP",
+                                   [](std::string_view device_id) -> std::unique_ptr<Sink> {
+                                       return std::make_unique<TCPSink>(std::string(device_id));
+                                   },
+                                   [] { return std::vector<std::string>{}; }};
+
 // sink_details is ordered in terms of desirability, with the best choice at the top.
 constexpr std::array sink_details = {
 #ifdef HAVE_LIBRETRO
@@ -67,6 +75,10 @@ std::vector<SinkDetails> ListSinks() {
 }
 
 const SinkDetails& GetSinkDetails(SinkType sink_type) {
+    if (sink_type == SinkType::TCP) {
+        return tcp_sink_details;
+    }
+
     auto iter = std::find_if(
         sink_details.begin(), sink_details.end(),
         [sink_type](const auto& sink_detail) { return sink_detail.type == sink_type; });

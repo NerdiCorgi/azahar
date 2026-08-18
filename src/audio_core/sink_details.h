@@ -23,6 +23,7 @@ enum class SinkType : u32 {
 #ifdef HAVE_LIBRETRO
     LibRetro = 5,
 #endif
+    TCP = 6,
 };
 
 struct SinkDetails {

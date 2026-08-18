@@ -8,6 +8,8 @@ add_library(input_common STATIC EXCLUDE_FROM_ALL
     motion_emu.cpp
     motion_emu.h
     precompiled_headers.h
+    retrocorgi_ipc/retrocorgi_ipc.cpp
+    retrocorgi_ipc/retrocorgi_ipc.h
     touch_from_button.cpp
     touch_from_button.h
     sdl/sdl.cpp

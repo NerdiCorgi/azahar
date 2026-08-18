@@ -4,10 +4,12 @@
 
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <span>
+#include <string>
+#include <string_view>
 #include <cryptopp/aes.h>
 #include <cryptopp/modes.h>
-#include <cryptopp/sha.h>
 #include "common/common_types.h"
 #include "common/file_derived.h"
 #include "common/logging/log.h"
@@ -15,8 +17,6 @@
 #include "core/file_sys/layered_fs.h"
 #include "core/file_sys/ncch_container.h"
 #include "core/file_sys/patch.h"
-#include "core/file_sys/seed_db.h"
-#include "core/hw/aes/key.h"
 #include "core/hw/unique_data.h"
 #include "core/loader/loader.h"
 
@@ -24,6 +24,195 @@ namespace FileSys {
 
 static const int kMaxSections = 8;   ///< Maximum number of sections (files) in an ExeFs
 static const int kBlockSize = 0x200; ///< Size of ExeFS blocks (in bytes)
+
+namespace {
+
+constexpr u32 NCCH_MEDIA_UNIT_SIZE = 0x200;
+
+const char* ResultStatusToString(Loader::ResultStatus status) {
+    switch (status) {
+    case Loader::ResultStatus::Success:
+        return "Success";
+    case Loader::ResultStatus::Error:
+        return "Error";
+    case Loader::ResultStatus::ErrorInvalidFormat:
+        return "ErrorInvalidFormat";
+    case Loader::ResultStatus::ErrorNotImplemented:
+        return "ErrorNotImplemented";
+    case Loader::ResultStatus::ErrorNotLoaded:
+        return "ErrorNotLoaded";
+    case Loader::ResultStatus::ErrorNotUsed:
+        return "ErrorNotUsed";
+    case Loader::ResultStatus::ErrorAlreadyLoaded:
+        return "ErrorAlreadyLoaded";
+    case Loader::ResultStatus::ErrorMemoryAllocationFailed:
+        return "ErrorMemoryAllocationFailed";
+    case Loader::ResultStatus::ErrorEncrypted:
+        return "ErrorEncrypted";
+    case Loader::ResultStatus::ErrorGbaTitle:
+        return "ErrorGbaTitle";
+    case Loader::ResultStatus::ErrorArtic:
+        return "ErrorArtic";
+    case Loader::ResultStatus::ErrorNotFound:
+        return "ErrorNotFound";
+    case Loader::ResultStatus::ErrorPatches:
+        return "ErrorPatches";
+    case Loader::ResultStatus::ErrorPatchesInvalidTitle:
+        return "ErrorPatchesInvalidTitle";
+    }
+
+    return "Unknown";
+}
+
+std::array<u8, 4> U32ToBEArray(u32 value) {
+    return std::array<u8, 4>{
+        static_cast<u8>(value >> 24),
+        static_cast<u8>((value >> 16) & 0xFF),
+        static_cast<u8>((value >> 8) & 0xFF),
+        static_cast<u8>(value & 0xFF),
+    };
+}
+
+std::array<u8, 16> GetExeFSReadCtr(const NCCH_Header& ncch_header,
+                                   const NCCHCryptoData& crypto_data) {
+    auto ctr = crypto_data.exefs_ctr;
+    if (ncch_header.version == 1) {
+        const auto exefs_offset =
+            U32ToBEArray(ncch_header.exefs_offset * NCCH_MEDIA_UNIT_SIZE);
+        std::copy(exefs_offset.begin(), exefs_offset.end(), ctr.begin() + 12);
+    }
+    return ctr;
+}
+
+std::size_t ReadAesCtrDecrypted(FileUtil::IOFileBase& file, const std::array<u8, 16>& key,
+                                 const std::array<u8, 16>& ctr, std::size_t file_offset,
+                                 std::size_t ctr_offset, void* buffer, std::size_t size) {
+    const std::size_t bytes_read =
+        file.ReadAtBytes(reinterpret_cast<u8*>(buffer), size, file_offset);
+    if (bytes_read == 0 || bytes_read == std::numeric_limits<std::size_t>::max()) {
+        return bytes_read;
+    }
+
+    CryptoPP::CTR_Mode<CryptoPP::AES>::Decryption decryptor;
+    decryptor.SetKeyWithIV(key.data(), key.size(), ctr.data());
+    if (ctr_offset != 0) {
+        decryptor.Seek(ctr_offset);
+    }
+    decryptor.ProcessData(reinterpret_cast<CryptoPP::byte*>(buffer),
+                          reinterpret_cast<CryptoPP::byte*>(buffer), bytes_read);
+    return bytes_read;
+}
+
+bool IsExeFSPrimarySection(const ExeFs_SectionHeader& section) {
+    return std::memcmp(section.name, "icon", 4) == 0 ||
+           std::memcmp(section.name, "banner", 6) == 0;
+}
+
+bool IsPlausibleExeFSSectionName(const ExeFs_SectionHeader& section, bool& known_name) {
+    std::size_t length = 0;
+    while (length < sizeof(section.name) && section.name[length] != '\0') {
+        const unsigned char ch = static_cast<unsigned char>(section.name[length]);
+        if (ch < 0x20 || ch > 0x7E) {
+            return false;
+        }
+        ++length;
+    }
+
+    for (std::size_t i = length; i < sizeof(section.name); ++i) {
+        if (section.name[i] != '\0') {
+            return false;
+        }
+    }
+
+    if (length == 0) {
+        return true;
+    }
+
+    const std::string_view name{section.name, length};
+    known_name = known_name || name == ".code" || name == "icon" || name == "banner" ||
+                 name == "logo";
+    return true;
+}
+
+bool IsPlausiblePlaintextExeFSHeader(const ExeFs_Header& header, std::size_t exefs_size) {
+    if (exefs_size < sizeof(ExeFs_Header)) {
+        return false;
+    }
+
+    const std::size_t max_section_end = exefs_size - sizeof(ExeFs_Header);
+    bool found_known_name = false;
+
+    for (const auto& section : header.section) {
+        if (!IsPlausibleExeFSSectionName(section, found_known_name)) {
+            return false;
+        }
+
+        const bool empty_name = section.name[0] == '\0';
+        if (empty_name) {
+            if (section.offset != 0 || section.size != 0) {
+                return false;
+            }
+            continue;
+        }
+
+        if (section.size == 0) {
+            return false;
+        }
+
+        const std::size_t offset = section.offset;
+        const std::size_t size = section.size;
+        if (offset > max_section_end || size > max_section_end - offset) {
+            return false;
+        }
+    }
+
+    return found_known_name;
+}
+
+class NCCHEncryptedRomFSReader final : public RomFSReader {
+public:
+    NCCHEncryptedRomFSReader(std::unique_ptr<FileUtil::IOFileBase>&& file_, std::size_t file_offset_,
+                             std::size_t size_, std::size_t ctr_offset_,
+                             const std::array<u8, 16>& key_, const std::array<u8, 16>& ctr_)
+        : file(std::move(file_)), file_offset(file_offset_), size(size_), ctr_offset(ctr_offset_),
+          key(key_), ctr(ctr_) {}
+
+    std::size_t GetSize() const override {
+        return size;
+    }
+
+    std::size_t ReadFile(std::size_t offset, std::size_t length, u8* buffer) override {
+        if (offset >= size) {
+            return 0;
+        }
+
+        const std::size_t read_size = std::min(length, size - offset);
+        if (read_size == 0) {
+            return 0;
+        }
+
+        return ReadAesCtrDecrypted(*file, key, ctr, file_offset + offset, ctr_offset + offset,
+                                   buffer, read_size);
+    }
+
+    bool AllowsCachedReads() const override {
+        return false;
+    }
+
+    bool CacheReady(std::size_t, std::size_t) override {
+        return false;
+    }
+
+private:
+    std::unique_ptr<FileUtil::IOFileBase> file;
+    std::size_t file_offset;
+    std::size_t size;
+    std::size_t ctr_offset;
+    std::array<u8, 16> key;
+    std::array<u8, 16> ctr;
+};
+
+} // namespace
 
 u64 GetModId(u64 program_id) {
     constexpr u64 UPDATE_MASK = 0x0000000e'00000000;
@@ -224,12 +413,66 @@ Loader::ResultStatus NCCHContainer::LoadHeader() {
     LOG_DEBUG(Service_FS, "NCCH type: {}", file->GetType().to_string());
 
     if (!ncch_header.no_crypto) {
-        // Encrypted NCCH are not supported
-        return Loader::ResultStatus::ErrorEncrypted;
+        use_internal_crypto = !file->GetType().HasType(FileUtil::IOType::Type::CryptoFile);
+        if (use_internal_crypto) {
+            const auto result = InitializeCrypto();
+            if (result != Loader::ResultStatus::Success) {
+                return result;
+            }
+        }
     }
 
     has_header = true;
     return Loader::ResultStatus::Success;
+}
+
+Loader::ResultStatus NCCHContainer::InitializeCrypto() {
+    if (crypto_initialized) {
+        return Loader::ResultStatus::Success;
+    }
+
+    switch (DeriveNCCHCryptoData(ncch_header, crypto_data)) {
+    case NCCHCryptoResult::Success:
+        crypto_initialized = true;
+        return Loader::ResultStatus::Success;
+    case NCCHCryptoResult::MissingPrimaryKeyX:
+        LOG_ERROR(Service_FS, "Missing NCCH Secure1 KeyX for {:016X}", ncch_header.program_id);
+        break;
+    case NCCHCryptoResult::MissingSecondaryKeyX:
+        LOG_ERROR(Service_FS, "Missing NCCH Secure{} KeyX for {:016X}",
+                  ncch_header.secondary_key_slot == 10   ? 3
+                  : ncch_header.secondary_key_slot == 11 ? 4
+                  : ncch_header.secondary_key_slot + 1, ncch_header.program_id);
+        break;
+    case NCCHCryptoResult::MissingSeed:
+        LOG_ERROR(Service_FS, "Missing NCCH seed for {:016X}", ncch_header.program_id);
+        break;
+    case NCCHCryptoResult::UnknownSecondaryKeySlot:
+        LOG_ERROR(Service_FS, "Unsupported NCCH secondary key slot {} for {:016X}",
+                  ncch_header.secondary_key_slot, ncch_header.program_id);
+        break;
+    case NCCHCryptoResult::UnknownVersion:
+        LOG_ERROR(Service_FS, "Unsupported NCCH crypto version {} for {:016X}",
+                  ncch_header.version, ncch_header.program_id);
+        break;
+    }
+
+    return Loader::ResultStatus::ErrorEncrypted;
+}
+
+bool NCCHContainer::UsesInternalCrypto() const {
+    return use_internal_crypto && crypto_initialized;
+}
+
+std::size_t NCCHContainer::ReadEncryptedBytes(const std::array<u8, 16>& key,
+                                              const std::array<u8, 16>& ctr,
+                                              std::size_t file_offset, std::size_t ctr_offset,
+                                              void* buffer, std::size_t size) {
+    if (!file || !file->IsOpen() || !UsesInternalCrypto()) {
+        return 0;
+    }
+
+    return ReadAesCtrDecrypted(*file, key, ctr, file_offset, ctr_offset, buffer, size);
 }
 
 Loader::ResultStatus NCCHContainer::Load() {
@@ -254,9 +497,16 @@ Loader::ResultStatus NCCHContainer::Load() {
             block_size = 1;
         }
 
-        if (!ncch_header.no_crypto) {
-            // Encrypted NCCH are not supported
-            return Loader::ResultStatus::ErrorEncrypted;
+        exefs_plaintext_despite_crypto = false;
+        if (UsesInternalCrypto() && ncch_header.exefs_size) {
+            const std::size_t exefs_offset = ncch_header.exefs_offset * block_size;
+            const std::size_t exefs_size = ncch_header.exefs_size * block_size;
+            ExeFs_Header raw_exefs_header{};
+            if (file->ReadAtBytes(&raw_exefs_header, sizeof(raw_exefs_header), exefs_offset) ==
+                sizeof(raw_exefs_header)) {
+                exefs_plaintext_despite_crypto =
+                    IsPlausiblePlaintextExeFSHeader(raw_exefs_header, exefs_size);
+            }
         }
 
         // System archives and DLC don't have an extended header but have RomFS
@@ -267,9 +517,18 @@ Loader::ResultStatus NCCHContainer::Load() {
                 return file && file->ReadBytes(&exheader_header, size) == size;
             };
 
-            file->Seek(sizeof(NCCH_Header), SEEK_SET);
-            if (!read_exheader(file.get())) {
-                return Loader::ResultStatus::Error;
+            if (UsesInternalCrypto() && !exefs_plaintext_despite_crypto) {
+                if (ReadEncryptedBytes(crypto_data.primary_key, crypto_data.exheader_ctr,
+                                       sizeof(NCCH_Header), 0, &exheader_header,
+                                       sizeof(exheader_header)) != sizeof(exheader_header)) {
+                    LOG_ERROR(Service_FS, "Could not decrypt NCCH exheader");
+                    return Loader::ResultStatus::Error;
+                }
+            } else {
+                file->Seek(sizeof(NCCH_Header), SEEK_SET);
+                if (!read_exheader(file.get())) {
+                    return Loader::ResultStatus::Error;
+                }
             }
 
             const auto mods_path =
@@ -303,29 +562,6 @@ Loader::ResultStatus NCCHContainer::Load() {
             }
 
             is_compressed = (exheader_header.codeset_info.flags.flag & 1) == 1;
-            u32 entry_point = exheader_header.codeset_info.text.address;
-            u32 code_size = exheader_header.codeset_info.text.code_size;
-            u32 stack_size = exheader_header.codeset_info.stack_size;
-            u32 bss_size = exheader_header.codeset_info.bss_size;
-            u32 core_version = exheader_header.arm11_system_local_caps.core_version;
-            u8 priority = exheader_header.arm11_system_local_caps.priority;
-            u8 resource_limit_category =
-                exheader_header.arm11_system_local_caps.resource_limit_category;
-
-            LOG_DEBUG(Service_FS, "Name:                        {}",
-                      reinterpret_cast<const char*>(exheader_header.codeset_info.name));
-            LOG_DEBUG(Service_FS, "Program ID:                  {:016X}", ncch_header.program_id);
-            LOG_DEBUG(Service_FS, "Code compressed:             {}", is_compressed ? "yes" : "no");
-            LOG_DEBUG(Service_FS, "Entry point:                 0x{:08X}", entry_point);
-            LOG_DEBUG(Service_FS, "Code size:                   0x{:08X}", code_size);
-            LOG_DEBUG(Service_FS, "Stack size:                  0x{:08X}", stack_size);
-            LOG_DEBUG(Service_FS, "Bss size:                    0x{:08X}", bss_size);
-            LOG_DEBUG(Service_FS, "Core version:                {}", core_version);
-            LOG_DEBUG(Service_FS, "Thread priority:             0x{:X}", priority);
-            LOG_DEBUG(Service_FS, "Resource limit category:     {}", resource_limit_category);
-            LOG_DEBUG(Service_FS, "System Mode:                 {}",
-                      static_cast<int>(exheader_header.arm11_system_local_caps.system_mode));
-
             has_exheader = true;
         }
 
@@ -334,15 +570,33 @@ Loader::ResultStatus NCCHContainer::Load() {
             u32 exefs_offset = ncch_header.exefs_offset * block_size;
             u32 exefs_size = ncch_header.exefs_size * block_size;
 
-            LOG_DEBUG(Service_FS, "ExeFS offset:                0x{:08X}", exefs_offset);
-            LOG_DEBUG(Service_FS, "ExeFS size:                  0x{:08X}", exefs_size);
-
             exefs_file = std::make_unique<FileUtil::SubIOFile>(std::move(file->OpenCopy()),
                                                                exefs_offset, exefs_size);
+            if (UsesInternalCrypto()) {
+                const auto exefs_ctr = GetExeFSReadCtr(ncch_header, crypto_data);
+                ExeFs_Header raw_exefs_header{};
+                const std::size_t encrypted_header_bytes_read =
+                    exefs_file->ReadAtBytes(&raw_exefs_header, sizeof(raw_exefs_header), 0);
+                if (!exefs_plaintext_despite_crypto &&
+                    encrypted_header_bytes_read == sizeof(raw_exefs_header)) {
+                    exefs_plaintext_despite_crypto =
+                        IsPlausiblePlaintextExeFSHeader(raw_exefs_header, exefs_size);
+                }
 
-            if (exefs_file->ReadAtBytes(&exefs_header, sizeof(ExeFs_Header), 0) !=
-                sizeof(ExeFs_Header))
+                if (exefs_plaintext_despite_crypto) {
+                    exefs_header = raw_exefs_header;
+                } else {
+                    if (ReadAesCtrDecrypted(*exefs_file, crypto_data.primary_key, exefs_ctr, 0, 0,
+                                            &exefs_header, sizeof(ExeFs_Header)) !=
+                        sizeof(ExeFs_Header)) {
+                        LOG_ERROR(Service_FS, "Could not decrypt NCCH ExeFS header");
+                        return Loader::ResultStatus::Error;
+                    }
+                }
+            } else if (exefs_file->ReadAtBytes(&exefs_header, sizeof(ExeFs_Header), 0) !=
+                       sizeof(ExeFs_Header)) {
                 return Loader::ResultStatus::Error;
+            }
 
             has_exefs = true;
         }
@@ -395,8 +649,12 @@ Loader::ResultStatus NCCHContainer::LoadOverrides() {
 
 Loader::ResultStatus NCCHContainer::LoadSectionExeFS(const char* name, std::vector<u8>& buffer) {
     Loader::ResultStatus result = Load();
-    if (result != Loader::ResultStatus::Success)
+    if (result != Loader::ResultStatus::Success) {
+        LOG_ERROR(Service_FS,
+                  "LoadSectionExeFS('{}') failed during NCCH load with ResultStatus {} ({})",
+                  name, static_cast<int>(result), ResultStatusToString(result));
         return result;
+    }
 
     int block_size = is_proto ? 1 : kBlockSize;
 
@@ -423,8 +681,14 @@ Loader::ResultStatus NCCHContainer::LoadSectionExeFS(const char* name, std::vect
 
     // Check if we have files that can drop-in and replace
     result = LoadOverrideExeFSSection(name, buffer);
-    if (result == Loader::ResultStatus::Success || !has_exefs)
+    if (result == Loader::ResultStatus::Success)
         return result;
+    if (!has_exefs) {
+        LOG_ERROR(Service_FS,
+                  "LoadSectionExeFS('{}') failed because NCCH has no ExeFS section",
+                  name);
+        return result;
+    }
 
     // As of firmware 5.0.0-11 the logo is stored between the access descriptor and the plain region
     // instead of the ExeFS.
@@ -447,47 +711,90 @@ Loader::ResultStatus NCCHContainer::LoadSectionExeFS(const char* name, std::vect
     }
 
     // If we don't have any separate files, we'll need a full ExeFS
-    if (!exefs_file->IsOpen())
+    if (!exefs_file->IsOpen()) {
+        LOG_ERROR(Service_FS,
+                  "LoadSectionExeFS('{}') failed because ExeFS is not present/open (has_exefs={})",
+                  name, has_exefs);
         return Loader::ResultStatus::Error;
+    }
 
-    LOG_DEBUG(Service_FS, "{} sections:", kMaxSections);
     // Iterate through the ExeFs archive until we find a section with the specified name...
     for (unsigned section_number = 0; section_number < kMaxSections; section_number++) {
         const auto& section = exefs_header.section[section_number];
 
         // Load the specified section...
         if (strcmp(section.name, name) == 0) {
-            LOG_DEBUG(Service_FS, "{} - offset: 0x{:08X}, size: 0x{:08X}, name: {}", section_number,
-                      section.offset, section.size, section.name);
-
             s64 section_offset =
                 is_proto ? section.offset : (section.offset + sizeof(ExeFs_Header));
-            exefs_file->Seek(section_offset, SEEK_SET);
 
             size_t section_size = is_proto ? Common::AlignUp(section.size, 0x10) : section.size;
+            const bool use_internal_crypto =
+                UsesInternalCrypto() && !exefs_plaintext_despite_crypto;
+            const auto& section_key = IsExeFSPrimarySection(section) ? crypto_data.primary_key
+                                                                     : crypto_data.secondary_key;
+            const std::size_t exefs_offset = ncch_header.exefs_offset * block_size;
+            const auto exefs_ctr = GetExeFSReadCtr(ncch_header, crypto_data);
 
             if (strcmp(section.name, ".code") == 0 && is_compressed) {
                 // Section is compressed, read compressed .code section...
                 std::vector<u8> temp_buffer(section_size);
-                if (exefs_file->ReadBytes(temp_buffer.data(), temp_buffer.size()) !=
-                    temp_buffer.size())
-                    return Loader::ResultStatus::Error;
+                if (use_internal_crypto) {
+                    if (ReadEncryptedBytes(section_key, exefs_ctr,
+                                           exefs_offset + section_offset, section_offset,
+                                           temp_buffer.data(), temp_buffer.size()) !=
+                        temp_buffer.size()) {
+                        LOG_ERROR(Service_FS,
+                                  "LoadSectionExeFS('{}') failed reading/decrypting compressed section '{}' at offset 0x{:08X}, size 0x{:08X}",
+                                  name, section.name, section.offset, section.size);
+                        return Loader::ResultStatus::Error;
+                    }
+                } else {
+                    exefs_file->Seek(section_offset, SEEK_SET);
+                    if (exefs_file->ReadBytes(temp_buffer.data(), temp_buffer.size()) !=
+                        temp_buffer.size()) {
+                        LOG_ERROR(Service_FS,
+                                  "LoadSectionExeFS('{}') failed reading compressed section '{}' at offset 0x{:08X}, size 0x{:08X}",
+                                  name, section.name, section.offset, section.size);
+                        return Loader::ResultStatus::Error;
+                    }
+                }
 
                 // Decompress .code section...
                 buffer.resize(LZSS_GetDecompressedSize(temp_buffer));
                 if (!LZSS_Decompress(temp_buffer, buffer)) {
+                    LOG_ERROR(Service_FS,
+                              "LoadSectionExeFS('{}') failed decompressing section '{}' at offset 0x{:08X}, compressed size 0x{:08X}",
+                              name, section.name, section.offset, section.size);
                     return Loader::ResultStatus::ErrorInvalidFormat;
                 }
             } else {
                 // Section is uncompressed...
                 buffer.resize(section_size);
-                if (exefs_file->ReadBytes(buffer.data(), section_size) != section_size)
-                    return Loader::ResultStatus::Error;
+                if (use_internal_crypto) {
+                    if (ReadEncryptedBytes(section_key, exefs_ctr,
+                                           exefs_offset + section_offset, section_offset,
+                                           buffer.data(), section_size) != section_size) {
+                        LOG_ERROR(Service_FS,
+                                  "LoadSectionExeFS('{}') failed reading/decrypting section '{}' at offset 0x{:08X}, size 0x{:08X}",
+                                  name, section.name, section.offset, section.size);
+                        return Loader::ResultStatus::Error;
+                    }
+                } else {
+                    exefs_file->Seek(section_offset, SEEK_SET);
+                    if (exefs_file->ReadBytes(buffer.data(), section_size) != section_size) {
+                        LOG_ERROR(Service_FS,
+                                  "LoadSectionExeFS('{}') failed reading section '{}' at offset 0x{:08X}, size 0x{:08X}",
+                                  name, section.name, section.offset, section.size);
+                        return Loader::ResultStatus::Error;
+                    }
+                }
             }
 
             return Loader::ResultStatus::Success;
         }
     }
+    LOG_ERROR(Service_FS, "LoadSectionExeFS('{}') could not find requested section in ExeFS",
+              name);
     return Loader::ResultStatus::ErrorNotUsed;
 }
 
@@ -604,11 +911,10 @@ Loader::ResultStatus NCCHContainer::ReadRomFS(std::shared_ptr<RomFSReader>& romf
     if (!file || !file->IsOpen())
         return Loader::ResultStatus::Error;
 
-    u32 romfs_offset = (ncch_header.romfs_offset * block_size) + 0x1000;
-    u32 romfs_size = (ncch_header.romfs_size * block_size) - 0x1000;
-
-    LOG_DEBUG(Service_FS, "RomFS offset:           0x{:08X}", romfs_offset);
-    LOG_DEBUG(Service_FS, "RomFS size:             0x{:08X}", romfs_size);
+    const u32 romfs_offset_bytes = ncch_header.romfs_offset * block_size;
+    const u32 romfs_region_size_bytes = ncch_header.romfs_size * block_size;
+    u32 romfs_offset = romfs_offset_bytes + 0x1000;
+    u32 romfs_size = romfs_region_size_bytes - 0x1000;
 
     if (file->GetSize() < romfs_offset + romfs_size)
         return Loader::ResultStatus::Error;
@@ -620,9 +926,16 @@ Loader::ResultStatus NCCHContainer::ReadRomFS(std::shared_ptr<RomFSReader>& romf
     if (!romfs_file_inner->IsOpen())
         return Loader::ResultStatus::Error;
 
-    std::shared_ptr<RomFSReader> direct_romfs =
-        std::make_shared<DirectRomFSReader>(std::make_unique<FileUtil::SubIOFile>(
+    std::shared_ptr<RomFSReader> direct_romfs;
+    if (UsesInternalCrypto() && !exefs_plaintext_despite_crypto) {
+        const std::size_t region_offset = romfs_offset_bytes;
+        direct_romfs = std::make_shared<NCCHEncryptedRomFSReader>(
+            std::move(romfs_file_inner), romfs_offset, romfs_size, romfs_offset - region_offset,
+            crypto_data.secondary_key, crypto_data.romfs_ctr);
+    } else {
+        direct_romfs = std::make_shared<DirectRomFSReader>(std::make_unique<FileUtil::SubIOFile>(
             std::move(romfs_file_inner), romfs_offset, romfs_size));
+    }
 
     const auto path =
         fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),

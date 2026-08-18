@@ -37,6 +37,45 @@ using namespace Common::Literals;
 static constexpr u64 UPDATE_TID_HIGH = 0x0004000e00000000;
 static constexpr u64 DLP_CHILD_TID_HIGH = 0x0004000100000000;
 
+namespace {
+
+const char* ResultStatusToString(ResultStatus status) {
+    switch (status) {
+    case ResultStatus::Success:
+        return "Success";
+    case ResultStatus::Error:
+        return "Error";
+    case ResultStatus::ErrorInvalidFormat:
+        return "ErrorInvalidFormat";
+    case ResultStatus::ErrorNotImplemented:
+        return "ErrorNotImplemented";
+    case ResultStatus::ErrorNotLoaded:
+        return "ErrorNotLoaded";
+    case ResultStatus::ErrorNotUsed:
+        return "ErrorNotUsed";
+    case ResultStatus::ErrorAlreadyLoaded:
+        return "ErrorAlreadyLoaded";
+    case ResultStatus::ErrorMemoryAllocationFailed:
+        return "ErrorMemoryAllocationFailed";
+    case ResultStatus::ErrorEncrypted:
+        return "ErrorEncrypted";
+    case ResultStatus::ErrorGbaTitle:
+        return "ErrorGbaTitle";
+    case ResultStatus::ErrorArtic:
+        return "ErrorArtic";
+    case ResultStatus::ErrorNotFound:
+        return "ErrorNotFound";
+    case ResultStatus::ErrorPatches:
+        return "ErrorPatches";
+    case ResultStatus::ErrorPatchesInvalidTitle:
+        return "ErrorPatchesInvalidTitle";
+    }
+
+    return "Unknown";
+}
+
+} // namespace
+
 FileType AppLoader_NCCH::IdentifyType(FileUtil::IOFileBase* in_file) {
     u32 magic{};
 
@@ -127,8 +166,23 @@ ResultStatus AppLoader_NCCH::LoadExec(std::shared_ptr<Kernel::Process>& process)
 
     std::vector<u8> code;
     u64_le program_id;
-    if (ResultStatus::Success == ReadCode(code) &&
-        ResultStatus::Success == ReadProgramId(program_id)) {
+    const ResultStatus read_code_result = ReadCode(code);
+    if (read_code_result != ResultStatus::Success) {
+        LOG_ERROR(Loader, "LoadExec failed to read/load .code with ResultStatus {} ({})",
+                  static_cast<int>(read_code_result), ResultStatusToString(read_code_result));
+        return ResultStatus::Error;
+    }
+
+    const ResultStatus read_program_id_result = ReadProgramId(program_id);
+    if (read_program_id_result != ResultStatus::Success) {
+        LOG_ERROR(Loader, "LoadExec failed to read program ID with ResultStatus {} ({})",
+                  static_cast<int>(read_program_id_result),
+                  ResultStatusToString(read_program_id_result));
+        return ResultStatus::Error;
+    }
+
+    if (ResultStatus::Success == read_code_result &&
+        ResultStatus::Success == read_program_id_result) {
         if (IsGbaVirtualConsole(code)) {
             LOG_ERROR(Loader, "Encountered unsupported GBA Virtual Console code section.");
             return ResultStatus::ErrorGbaTitle;
@@ -165,8 +219,14 @@ ResultStatus AppLoader_NCCH::LoadExec(std::shared_ptr<Kernel::Process>& process)
 
         // Apply patches now that the entire codeset (including .bss) has been allocated
         const ResultStatus patch_result = overlay_ncch->ApplyCodePatch(code);
-        if (patch_result != ResultStatus::Success && patch_result != ResultStatus::ErrorNotUsed)
+        if (patch_result != ResultStatus::Success && patch_result != ResultStatus::ErrorNotUsed) {
+            if (patch_result == ResultStatus::Error) {
+                LOG_ERROR(Loader,
+                          "LoadExec ApplyCodePatch failed with generic ResultStatus {} ({})",
+                          static_cast<int>(patch_result), ResultStatusToString(patch_result));
+            }
             return patch_result;
+        }
 
         codeset->entrypoint = codeset->CodeSegment().addr;
         codeset->memory = std::move(code);
@@ -244,6 +304,8 @@ ResultStatus AppLoader_NCCH::LoadExec(std::shared_ptr<Kernel::Process>& process)
         process->Run(priority, stack_size);
         return ResultStatus::Success;
     }
+    LOG_ERROR(Loader, "LoadExec failed with generic ResultStatus {} ({})",
+              static_cast<int>(ResultStatus::Error), ResultStatusToString(ResultStatus::Error));
     return ResultStatus::Error;
 }
 
@@ -303,11 +365,21 @@ ResultStatus AppLoader_NCCH::Load(std::shared_ptr<Kernel::Process>& process) {
 
     if (!is_dlp_child) {
         u64 update_tid = (ncch_program_id & 0xFFFFFFFFULL) | UPDATE_TID_HIGH;
-        update_ncch.OpenFile(
-            Service::AM::GetTitleContentPath(Service::FS::MediaType::SDMC, update_tid));
-        result = update_ncch.Load();
-        if (result == ResultStatus::Success) {
+        const std::string update_path =
+            Service::AM::GetTitleContentPath(Service::FS::MediaType::SDMC, update_tid);
+        if (FileUtil::Exists(update_path)) {
+            result = update_ncch.OpenFile(update_path);
+            if (result != ResultStatus::Success)
+                return result;
+
+            result = update_ncch.Load();
+            if (result != ResultStatus::Success)
+                return result;
+
             overlay_ncch = &update_ncch;
+        } else {
+            LOG_INFO(Loader, "Update content not found at {}, loading base NCCH only.",
+                     update_path);
         }
     }
 

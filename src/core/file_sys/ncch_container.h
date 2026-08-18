@@ -12,6 +12,7 @@
 #include "common/common_types.h"
 #include "common/file_util.h"
 #include "common/swap.h"
+#include "core/file_sys/ncch_crypto.h"
 #include "core/file_sys/romfs_reader.h"
 #include "core/loader/loader.h"
 
@@ -370,12 +371,22 @@ private:
     bool is_tainted = false; // Are there parts of this container being overridden?
     bool is_loaded = false;
     bool is_compressed = false;
+    bool use_internal_crypto = false;
+    bool crypto_initialized = false;
+    bool exefs_plaintext_despite_crypto = false;
 
     u32 partition = 0;
+
+    Loader::ResultStatus InitializeCrypto();
+    bool UsesInternalCrypto() const;
+    std::size_t ReadEncryptedBytes(const std::array<u8, 16>& key, const std::array<u8, 16>& ctr,
+                                   std::size_t file_offset, std::size_t ctr_offset, void* buffer,
+                                   std::size_t size);
 
     std::string filepath;
     std::unique_ptr<FileUtil::IOFileBase> file;
     std::unique_ptr<FileUtil::IOFileBase> exefs_file;
+    NCCHCryptoData crypto_data{};
 };
 
 } // namespace FileSys

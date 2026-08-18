@@ -14,6 +14,7 @@
 #include "input_common/keyboard.h"
 #include "input_common/main.h"
 #include "input_common/motion_emu.h"
+#include "input_common/retrocorgi_ipc/retrocorgi_ipc.h"
 #include "input_common/sdl/sdl.h"
 #include "input_common/sdl/sdl_impl.h"
 #include "input_common/touch_from_button.h"
@@ -28,6 +29,7 @@ std::shared_ptr<GCAdapter::Adapter> gcadapter;
 #endif
 static std::shared_ptr<Keyboard> keyboard;
 static std::shared_ptr<MotionEmu> motion_emu;
+static std::unique_ptr<RetroCorgiIPC::State> retrocorgi_ipc;
 static std::unique_ptr<CemuhookUDP::State> udp;
 static std::unique_ptr<SDL::State> sdl;
 
@@ -47,6 +49,7 @@ void Init() {
     Input::RegisterFactory<Input::MotionDevice>("motion_emu", motion_emu);
     Input::RegisterFactory<Input::TouchDevice>("touch_from_button",
                                                std::make_shared<TouchFromButtonFactory>());
+    retrocorgi_ipc = RetroCorgiIPC::Init();
 
     sdl = SDL::Init();
 
@@ -65,6 +68,7 @@ void Shutdown() {
     Input::UnregisterFactory<Input::AnalogDevice>("analog_from_button");
     Input::UnregisterFactory<Input::MotionDevice>("motion_emu");
     motion_emu.reset();
+    retrocorgi_ipc.reset();
     Input::UnregisterFactory<Input::TouchDevice>("emu_window");
     Input::UnregisterFactory<Input::TouchDevice>("touch_from_button");
     sdl.reset();

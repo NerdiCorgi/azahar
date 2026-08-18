@@ -83,6 +83,8 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
     file_sys/layered_fs.h
     file_sys/ncch_container.cpp
     file_sys/ncch_container.h
+    file_sys/ncch_crypto.cpp
+    file_sys/ncch_crypto.h
     file_sys/otp.cpp
     file_sys/otp.h
     file_sys/patch.cpp

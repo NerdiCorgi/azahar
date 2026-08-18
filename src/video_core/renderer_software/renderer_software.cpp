@@ -51,7 +51,7 @@ void RendererSoftware::LoadFBToScreenInfo(int i, const Pica::ColorFill& color_fi
 
     for (u32 y = 0; y < info.height; y++) {
         for (u32 x = 0; x < info.width; x++) {
-            const u8* pixel = framebuffer_data + (y * pixel_stride + pixel_stride - x) * bpp;
+            const u8* pixel = framebuffer_data + (y * pixel_stride + pixel_stride - x - 1) * bpp;
             Common::Vec4 color = [&] {
                 if (color_fill.is_enabled) {
                     return Common::Vec4<u8>(color_fill.color_r, color_fill.color_g,

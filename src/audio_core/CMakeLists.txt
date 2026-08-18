@@ -31,6 +31,8 @@ add_library(audio_core STATIC EXCLUDE_FROM_ALL
     sink.h
     sink_details.cpp
     sink_details.h
+    tcp_sink.cpp
+    tcp_sink.h
     static_input.cpp
     static_input.h
     time_stretch.cpp

@@ -57,31 +57,21 @@ void File::Read(Kernel::HLERequestContext& ctx) {
     IPC::RequestParser rp(ctx);
     u64 offset = rp.Pop<u64>();
     u32 length = rp.Pop<u32>();
-    LOG_TRACE(Service_FS, "Read {}: offset=0x{:x} length=0x{:08X}", GetName(), offset, length);
 
     const FileSessionSlot* file = GetSessionData(ctx.Session());
 
     if (file->subfile && length > file->size) {
-        LOG_DEBUG(Service_FS, "Trying to read beyond the subfile size, truncating");
         length = static_cast<u32>(file->size);
     }
 
     // This file session might have a specific offset from where to start reading, apply it.
     offset += file->offset;
 
-    if (offset + length > backend->GetSize()) {
-        LOG_DEBUG(Service_FS,
-                  "Reading from out of bounds offset=0x{:x} length=0x{:08X} file_size=0x{:x}",
-                  offset, length, backend->GetSize());
-    }
-
-    const bool allows_cache_reads = backend->AllowsCachedReads();
-
     // Conventional reading if the backend does not support cache.
     // Do not use asynchronous operations on file reads, as in most cases
     // there are many of them with small sizes. This causes a lot of delay
     // due to thread communication overhead.
-    if (!allows_cache_reads) {
+    if (!backend->AllowsCachedReads()) {
         auto& buffer = rp.PopMappedBuffer();
         IPC::RequestBuilder rb = rp.MakeBuilder(2, 2);
         std::unique_ptr<u8[]> data = std::make_unique_for_overwrite<u8[]>(length);
@@ -125,7 +115,6 @@ void File::Read(Kernel::HLERequestContext& ctx) {
         async_data->pre_timer = std::chrono::steady_clock::now();
     }
 
-    // LOG_DEBUG(Service_FS, "cache={}, offset={}, length={}", cache_ready, offset, length);
     ctx.RunAsync(
         [this, async_data](Kernel::HLERequestContext& ctx) {
             async_data->data = std::make_unique_for_overwrite<u8[]>(async_data->length);
@@ -144,12 +133,6 @@ void File::Read(Kernel::HLERequestContext& ctx) {
                 const auto time_took = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            std::chrono::steady_clock::now() - async_data->pre_timer)
                                            .count();
-                /*
-                if (time_took > read_delay) {
-                    LOG_DEBUG(Service_FS, "Took longer! length={}, time_took={}, read_delay={}",
-                              async_data->length, time_took, read_delay);
-                }
-                */
                 return static_cast<s64>((read_delay > time_took) ? (read_delay - time_took) : 0);
             } else {
                 return static_cast<s64>(read_delay);
@@ -345,6 +328,7 @@ void File::Flush(Kernel::HLERequestContext& ctx) {
         IPC::RequestBuilder rb = rp.MakeBuilder(1, 0);
         backend->Flush();
         rb.Push(ResultSuccess);
+        return;
     }
 
     ctx.RunAsync(

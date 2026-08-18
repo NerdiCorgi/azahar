@@ -193,6 +193,7 @@ add_subdirectory(video_core)
 add_subdirectory(audio_core)
 add_subdirectory(network)
 add_subdirectory(input_common)
+add_subdirectory(citra_headless)
 
 if (ENABLE_TESTS)
     add_subdirectory(tests)

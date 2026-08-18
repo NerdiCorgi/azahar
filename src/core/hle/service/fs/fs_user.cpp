@@ -232,6 +232,7 @@ void FS_USER::OpenFileDirectly(Kernel::HLERequestContext& ctx) {
             if (async_data->archive_handle.Failed()) {
                 rb.Push(async_data->archive_handle.Code());
                 rb.PushMoveObjects<Kernel::Object>(nullptr);
+                return;
             }
 
             rb.Push(async_data->file.first.Code());

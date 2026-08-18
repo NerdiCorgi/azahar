@@ -111,19 +111,18 @@ const std::array<ServiceModuleInfo, 41> service_module_map{
 
 /**
  * Creates a function string for logging, complete with the name (or header code, depending
- * on what's passed in) the port name, and all the cmd_buff arguments.
+ * on what's passed in) the port name, and command-buffer metadata.
  */
 [[maybe_unused]] static std::string MakeFunctionString(std::string_view name,
                                                        std::string_view port_name,
                                                        const u32* cmd_buff) {
-    // Number of params == bits 0-5 + bits 6-11
-    int num_params = (cmd_buff[0] & 0x3F) + ((cmd_buff[0] >> 6) & 0x3F);
+    const IPC::Header header{cmd_buff[0]};
 
-    std::string function_string = fmt::format("function '{}': port={}", name, port_name);
-    for (int i = 1; i <= num_params; ++i) {
-        function_string += fmt::format(", cmd_buff[{}]={:#X}", i, cmd_buff[i]);
-    }
-    return function_string;
+    return fmt::format(
+        "function '{}': port={} command_header=0x{:08X} command_id=0x{:04X} normal_params={} "
+        "translate_params={}",
+        name, port_name, header.raw, header.command_id.Value(), header.normal_params_size.Value(),
+        header.translate_params_size.Value());
 }
 
 ServiceFrameworkBase::ServiceFrameworkBase(const char* service_name, u32 max_sessions,
@@ -154,18 +153,13 @@ void ServiceFrameworkBase::RegisterHandlersBase(const FunctionInfoBase* function
 
 void ServiceFrameworkBase::ReportUnimplementedFunction(u32* cmd_buf, const FunctionInfoBase* info) {
     IPC::Header header{cmd_buf[0]};
-    int num_params = header.normal_params_size + header.translate_params_size;
     std::string function_name = info == nullptr ? fmt::format("{:#08x}", cmd_buf[0]) : info->name;
 
     std::string result =
-        fmt::format("function '{}': port='{}' cmd_buf={{[0]={:#x} (0x{:04X}, {}, {})",
+        fmt::format("function '{}': port='{}' command_header=0x{:08X} command_id=0x{:04X} "
+                    "normal_params={} translate_params={}",
                     function_name, service_name, header.raw, header.command_id.Value(),
                     header.normal_params_size.Value(), header.translate_params_size.Value());
-    for (int i = 1; i <= num_params; ++i) {
-        result += fmt::format(", [{}]={:#x}", i, cmd_buf[i]);
-    }
-
-    result.push_back('}');
 
     LOG_ERROR(Service, "unknown / unimplemented {}", result);
     // TODO(bunnei): Hack - ignore error
