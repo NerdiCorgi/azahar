@@ -222,21 +222,25 @@ int PrintCoreError(Core::System::ResultStatus status, const Core::System& system
 }
 
 std::string MakeRetroCorgiButtonParam(std::string_view control, u16 port) {
-    Common::ParamPackage param{{"engine", "retrocorgi_ipc"},
-                               {"control", std::string{control}},
-                               {"port", static_cast<int>(port)}};
+    Common::ParamPackage param;
+    param.Set("engine", "retrocorgi_ipc");
+    param.Set("control", std::string{control});
+    param.Set("port", std::to_string(port));
     return param.Serialize();
 }
 
 std::string MakeRetroCorgiAnalogParam(std::string_view control, u16 port) {
-    Common::ParamPackage param{{"engine", "retrocorgi_ipc"},
-                               {"control", std::string{control}},
-                               {"port", static_cast<int>(port)}};
+    Common::ParamPackage param;
+    param.Set("engine", "retrocorgi_ipc");
+    param.Set("control", std::string{control});
+    param.Set("port", std::to_string(port));
     return param.Serialize();
 }
 
 std::string MakeRetroCorgiTouchParam(u16 port) {
-    Common::ParamPackage param{{"engine", "retrocorgi_ipc"}, {"port", static_cast<int>(port)}};
+    Common::ParamPackage param;
+    param.Set("engine", "retrocorgi_ipc");
+    param.Set("port", std::to_string(port));
     return param.Serialize();
 }
 
