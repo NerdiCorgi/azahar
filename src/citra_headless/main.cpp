@@ -610,7 +610,10 @@ int main(int argc, char* argv[]) {
         if (pending_state_request.has_value()) {
             CompleteRetroCorgiStateRequest(*pending_state_request, result, system);
             pending_state_request.reset();
-            if (result == Core::System::ResultStatus::Success) {
+            // Native state validation failures are recoverable; report them over IPC instead of
+            // terminating the emulator and resetting the browser connection.
+            if (result == Core::System::ResultStatus::Success ||
+                result == Core::System::ResultStatus::ErrorSavestate) {
                 continue;
             }
         }
