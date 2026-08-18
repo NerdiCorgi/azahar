@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cctype>
 #include <csignal>
+#include <exception>
 #include <cstdlib>
 #include <cstdio>
 #include <iostream>
@@ -249,6 +250,98 @@ void ApplyHeadlessRetroCorgiInputDefaults() {
     profile.touch_device = MakeRetroCorgiTouchParam();
 }
 
+bool WaitForAsyncOperationsToDrain(Core::System& system) {
+    if (!system.KernelRunning() || !system.Kernel().AreAsyncOperationsPending()) {
+        return true;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    while (system.Kernel().AreAsyncOperationsPending()) {
+        if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
+            return false;
+        }
+
+        const auto result = system.RunLoop();
+        if (result != Core::System::ResultStatus::Success) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::vector<u8> ReadFileBytes(const std::string& path) {
+    FileUtil::IOFile file(path, "rb");
+    if (!file) {
+        throw std::runtime_error("Could not open file " + path);
+    }
+
+    const auto size = FileUtil::GetSize(path);
+    if (size <= 0) {
+        throw std::runtime_error("Could not read save-state file " + path);
+    }
+
+    std::vector<u8> buffer(static_cast<std::size_t>(size));
+    if (file.ReadBytes(buffer.data(), buffer.size()) != buffer.size()) {
+        throw std::runtime_error("Could not read file " + path);
+    }
+    return buffer;
+}
+
+std::size_t WriteFileBytes(const std::string& path, const std::vector<u8>& buffer) {
+    if (!FileUtil::CreateFullPath(path)) {
+        throw std::runtime_error("Could not create path " + path);
+    }
+
+    FileUtil::IOFile file(path, "wb");
+    if (!file) {
+        throw std::runtime_error("Could not open file " + path);
+    }
+    if (file.WriteBytes(buffer.data(), buffer.size()) != buffer.size()) {
+        throw std::runtime_error("Could not write file " + path);
+    }
+    return buffer.size();
+}
+
+void DrainRetroCorgiStateRequests(Core::System& system) {
+    while (true) {
+        const auto request = InputCommon::PopRetroCorgiIPCRequest();
+        if (!request.has_value()) {
+            return;
+        }
+
+        try {
+            if (!system.IsPoweredOn()) {
+                throw std::runtime_error("System is not powered on");
+            }
+            if (!system.GetAppLoader().SupportsSaveStates()) {
+                throw std::runtime_error("The current app loader doesn't support save states");
+            }
+            if (!WaitForAsyncOperationsToDrain(system)) {
+                throw std::runtime_error("Timed out waiting for async operations to complete");
+            }
+
+            if (request->type == InputCommon::RetroCorgiIPC::StateRequest::Type::SaveState) {
+                const auto buffer = system.SaveStateBuffer();
+                const auto bytes = WriteFileBytes(request->path, buffer);
+                InputCommon::CompleteRetroCorgiIPCRequest(*request, true, bytes,
+                                                          "save-state completed");
+                continue;
+            }
+
+            auto buffer = ReadFileBytes(request->path);
+            const auto bytes = buffer.size();
+            if (!system.LoadStateBuffer(std::move(buffer))) {
+                throw std::runtime_error("Invalid save-state buffer");
+            }
+            InputCommon::CompleteRetroCorgiIPCRequest(*request, true, bytes,
+                                                      "load-state completed");
+        } catch (const std::exception& exception) {
+            InputCommon::CompleteRetroCorgiIPCRequest(*request, false, 0, exception.what());
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -413,6 +506,7 @@ int main(int argc, char* argv[]) {
 
     while (!deadline.has_value() || std::chrono::steady_clock::now() < *deadline) {
         window.PollEvents();
+        DrainRetroCorgiStateRequests(system);
         const auto result = system.RunLoop();
         if (result == Core::System::ResultStatus::Success) {
             continue;

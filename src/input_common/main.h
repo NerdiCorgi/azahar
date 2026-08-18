@@ -4,9 +4,13 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "input_common/retrocorgi_ipc/retrocorgi_ipc.h"
 
 namespace Common {
 class ParamPackage;
@@ -45,6 +49,10 @@ Common::ParamPackage GetControllerAnalogBinds(const Common::ParamPackage& params
 
 /// Reloads the input devices
 void ReloadInputDevices();
+
+std::optional<RetroCorgiIPC::StateRequest> PopRetroCorgiIPCRequest();
+void CompleteRetroCorgiIPCRequest(const RetroCorgiIPC::StateRequest& request, bool success,
+                                  std::size_t bytes, const std::string& message);
 
 namespace Polling {
 

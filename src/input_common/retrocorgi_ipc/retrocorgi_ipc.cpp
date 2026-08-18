@@ -4,12 +4,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
+#include <deque>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <utility>
@@ -45,7 +49,86 @@ struct SharedState {
     std::map<std::string, bool> buttons;
     std::map<std::string, std::pair<float, float>> analogs;
     std::tuple<float, float, bool> touch{};
+
+    struct ConnectionState {
+        explicit ConnectionState(std::shared_ptr<tcp::socket> socket_) : socket(std::move(socket_)) {}
+
+        std::shared_ptr<tcp::socket> socket;
+        std::mutex write_mutex;
+        std::atomic_bool open{true};
+    };
+
+    struct PendingStateRequest {
+        StateRequest request;
+        std::shared_ptr<ConnectionState> connection;
+    };
+
+    std::mutex request_mutex;
+    std::deque<StateRequest> request_queue;
+    std::map<std::uint64_t, PendingStateRequest> pending_state_requests;
+    std::uint64_t next_request_token = 1;
 };
+
+std::string TrimLeadingWhitespace(std::string value) {
+    const auto first = value.find_first_not_of(" \f\n\r\t\v");
+    if (first == std::string::npos) {
+        value.clear();
+        return value;
+    }
+    value.erase(0, first);
+    return value;
+}
+
+std::string EscapeJsonString(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const unsigned char ch : value) {
+        switch (ch) {
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '"':
+            escaped += "\\\"";
+            break;
+        case '\b':
+            escaped += "\\b";
+            break;
+        case '\f':
+            escaped += "\\f";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        case '\t':
+            escaped += "\\t";
+            break;
+        default:
+            if (ch < 0x20) {
+                std::ostringstream stream;
+                stream << "\\u" << std::hex << std::uppercase << std::setw(4)
+                       << std::setfill('0') << static_cast<int>(ch);
+                escaped += stream.str();
+            } else {
+                escaped.push_back(static_cast<char>(ch));
+            }
+            break;
+        }
+    }
+    return escaped;
+}
+
+std::string MakeStateResponseJson(const StateRequest& request, bool success, std::size_t bytes,
+                                  std::string_view message) {
+    std::ostringstream stream;
+    stream << "{\"id\":\"" << EscapeJsonString(request.id) << "\",\"status\":\""
+           << (success ? "ok" : "error") << "\",\"path\":\""
+           << EscapeJsonString(request.path) << "\",\"bytes\":" << bytes
+           << ",\"message\":\"" << EscapeJsonString(message) << "\"}\n";
+    return stream.str();
+}
 
 class LineServer {
 public:
@@ -116,10 +199,11 @@ private:
         //   reset
         // One command is processed per newline. Unknown or malformed lines are ignored.
         while (!stopping.load()) {
-            auto socket = std::make_shared<tcp::socket>(io_context);
-            {
-                std::lock_guard guard(socket_mutex);
-                active_socket = socket;
+             auto socket = std::make_shared<tcp::socket>(io_context);
+             auto connection = std::make_shared<SharedState::ConnectionState>(socket);
+             {
+                 std::lock_guard guard(socket_mutex);
+                 active_socket = socket;
             }
 
             acceptor.accept(*socket, ec);
@@ -145,16 +229,17 @@ private:
 
                 std::istream input(&buffer);
                 std::string line;
-                std::getline(input, line);
-                if (!line.empty() && line.back() == '\r') {
-                    line.pop_back();
-                }
-                HandleLine(line);
-            }
+                 std::getline(input, line);
+                 if (!line.empty() && line.back() == '\r') {
+                     line.pop_back();
+                 }
+                 HandleLine(line, connection);
+             }
 
-            socket->close(ec);
-            {
-                std::lock_guard guard(socket_mutex);
+             connection->open.store(false);
+             socket->close(ec);
+             {
+                 std::lock_guard guard(socket_mutex);
                 if (active_socket == socket) {
                     active_socket.reset();
                 }
@@ -162,7 +247,8 @@ private:
         }
     }
 
-    void HandleLine(const std::string& line) {
+    void HandleLine(const std::string& line,
+                    const std::shared_ptr<SharedState::ConnectionState>& connection) {
         std::istringstream stream(line);
         std::string command;
         if (!(stream >> command)) {
@@ -220,6 +306,33 @@ private:
             std::lock_guard guard(shared->update_mutex);
             shared->touch = {std::clamp(x, 0.0f, 1.0f), std::clamp(y, 0.0f, 1.0f),
                              pressed == 1};
+            return;
+        }
+
+        if (command == "save-state" || command == "load-state") {
+            std::string id;
+            if (!(stream >> id)) {
+                return;
+            }
+
+            std::string path;
+            std::getline(stream, path);
+            path = TrimLeadingWhitespace(path);
+            if (path.empty()) {
+                return;
+            }
+
+            StateRequest request;
+            request.type = command == "save-state" ? StateRequest::Type::SaveState
+                                                     : StateRequest::Type::LoadState;
+            request.id = std::move(id);
+            request.path = std::move(path);
+
+            std::lock_guard guard(shared->request_mutex);
+            request.token = shared->next_request_token++;
+            shared->request_queue.push_back(request);
+            shared->pending_state_requests.emplace(
+                request.token, SharedState::PendingStateRequest{request, connection});
         }
     }
 
@@ -383,6 +496,48 @@ void State::EnsureListener(int port) {
         impl->listener = std::make_unique<LineServer>(impl->shared, static_cast<u16>(port));
         impl->listener->Start();
         impl->listener_port = port;
+    }
+}
+
+std::optional<StateRequest> State::PopStateRequest() {
+    std::lock_guard guard(impl->shared->request_mutex);
+    if (impl->shared->request_queue.empty()) {
+        return std::nullopt;
+    }
+
+    StateRequest request = impl->shared->request_queue.front();
+    impl->shared->request_queue.pop_front();
+    return request;
+}
+
+void State::CompleteStateRequest(const StateRequest& request, bool success, std::size_t bytes,
+                                 const std::string& message) {
+    std::shared_ptr<SharedState::ConnectionState> connection;
+    {
+        std::lock_guard guard(impl->shared->request_mutex);
+        const auto it = impl->shared->pending_state_requests.find(request.token);
+        if (it == impl->shared->pending_state_requests.end()) {
+            return;
+        }
+        connection = it->second.connection;
+        impl->shared->pending_state_requests.erase(it);
+    }
+
+    if (!connection || !connection->open.load() || !connection->socket) {
+        return;
+    }
+
+    const std::string response = MakeStateResponseJson(request, success, bytes, message);
+    std::lock_guard guard(connection->write_mutex);
+    if (!connection->open.load()) {
+        return;
+    }
+
+    boost::system::error_code ec;
+    boost::asio::write(*connection->socket, boost::asio::buffer(response), ec);
+    if (ec) {
+        connection->open.store(false);
+        LOG_WARNING(Input, "retrocorgi_ipc failed to send state response: {}", ec.message());
     }
 }
 

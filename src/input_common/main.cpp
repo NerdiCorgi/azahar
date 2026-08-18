@@ -241,6 +241,21 @@ void ReloadInputDevices() {
     udp->ReloadUDPClient();
 }
 
+std::optional<RetroCorgiIPC::StateRequest> PopRetroCorgiIPCRequest() {
+    if (!retrocorgi_ipc) {
+        return std::nullopt;
+    }
+    return retrocorgi_ipc->PopStateRequest();
+}
+
+void CompleteRetroCorgiIPCRequest(const RetroCorgiIPC::StateRequest& request, bool success,
+                                  std::size_t bytes, const std::string& message) {
+    if (!retrocorgi_ipc) {
+        return;
+    }
+    retrocorgi_ipc->CompleteStateRequest(request, success, bytes, message);
+}
+
 namespace Polling {
 
 std::vector<std::unique_ptr<DevicePoller>> GetPollers(DeviceType type) {
