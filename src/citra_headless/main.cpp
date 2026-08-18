@@ -359,6 +359,9 @@ void ProcessRetroCorgiStateRequest(Core::System& system, HeadlessWindow& window)
         return;
     }
 
+    window.SetSuppressRawVideoCapture(true);
+    SCOPE_EXIT({ window.SetSuppressRawVideoCapture(false); });
+
     try {
         if (!system.IsPoweredOn()) {
             throw std::runtime_error("System is not powered on");
@@ -380,8 +383,6 @@ void ProcessRetroCorgiStateRequest(Core::System& system, HeadlessWindow& window)
 
         auto buffer = ReadRequiredFile(request->path);
         const auto bytes = buffer.size();
-        window.SetSuppressRawVideoCapture(true);
-        SCOPE_EXIT({ window.SetSuppressRawVideoCapture(false); });
         if (!system.LoadStateBuffer(std::move(buffer))) {
             const auto& details = system.GetStatusDetails();
             throw std::runtime_error(details.empty() ? "Native load-state operation failed"
