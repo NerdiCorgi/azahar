@@ -44,6 +44,7 @@ struct SharedState {
     mutable std::mutex update_mutex;
     std::map<std::string, bool> buttons;
     std::map<std::string, std::pair<float, float>> analogs;
+    std::tuple<float, float, bool> touch{};
 };
 
 class LineServer {
@@ -111,6 +112,7 @@ private:
         // Minimal localhost line protocol:
         //   button <control> <0|1>
         //   analog <control> <x> <y>
+        //   touch <x> <y> <0|1>
         //   reset
         // One command is processed per newline. Unknown or malformed lines are ignored.
         while (!stopping.load()) {
@@ -171,6 +173,7 @@ private:
             std::lock_guard guard(shared->update_mutex);
             shared->buttons.clear();
             shared->analogs.clear();
+            shared->touch = {};
             return;
         }
 
@@ -200,6 +203,23 @@ private:
             std::lock_guard guard(shared->update_mutex);
             shared->analogs[control] = {std::clamp(x, -1.0f, 1.0f),
                                         std::clamp(y, -1.0f, 1.0f)};
+            return;
+        }
+
+        if (command == "touch") {
+            float x = 0.0f;
+            float y = 0.0f;
+            int pressed = 0;
+            if (!(stream >> x >> y >> pressed)) {
+                return;
+            }
+            if (pressed != 0 && pressed != 1) {
+                return;
+            }
+
+            std::lock_guard guard(shared->update_mutex);
+            shared->touch = {std::clamp(x, 0.0f, 1.0f), std::clamp(y, 0.0f, 1.0f),
+                             pressed == 1};
         }
     }
 
@@ -257,6 +277,19 @@ private:
     std::string control;
 };
 
+class TouchDevice final : public Input::TouchDevice {
+public:
+    explicit TouchDevice(std::shared_ptr<SharedState> shared_) : shared(std::move(shared_)) {}
+
+    std::tuple<float, float, bool> GetStatus() const override {
+        std::lock_guard guard(shared->update_mutex);
+        return shared->touch;
+    }
+
+private:
+    std::shared_ptr<SharedState> shared;
+};
+
 class ButtonFactory final : public Input::Factory<Input::ButtonDevice> {
 public:
     ButtonFactory(State* state_, std::shared_ptr<SharedState> shared_)
@@ -287,16 +320,34 @@ private:
     std::shared_ptr<SharedState> shared;
 };
 
+class TouchFactory final : public Input::Factory<Input::TouchDevice> {
+public:
+    TouchFactory(State* state_, std::shared_ptr<SharedState> shared_)
+        : state(state_), shared(std::move(shared_)) {}
+
+    std::unique_ptr<Input::TouchDevice> Create(const Common::ParamPackage& params) override {
+        state->EnsureListener(params.Get("port", 0));
+        return std::make_unique<TouchDevice>(shared);
+    }
+
+private:
+    State* state;
+    std::shared_ptr<SharedState> shared;
+};
+
 State::State() : impl(std::make_unique<Impl>()) {
     Input::RegisterFactory<Input::ButtonDevice>("retrocorgi_ipc",
                                                 std::make_shared<ButtonFactory>(this, impl->shared));
     Input::RegisterFactory<Input::AnalogDevice>("retrocorgi_ipc",
                                                 std::make_shared<AnalogFactory>(this, impl->shared));
+    Input::RegisterFactory<Input::TouchDevice>("retrocorgi_ipc",
+                                               std::make_shared<TouchFactory>(this, impl->shared));
 }
 
 State::~State() {
     Input::UnregisterFactory<Input::ButtonDevice>("retrocorgi_ipc");
     Input::UnregisterFactory<Input::AnalogDevice>("retrocorgi_ipc");
+    Input::UnregisterFactory<Input::TouchDevice>("retrocorgi_ipc");
 
     std::unique_ptr<LineServer> listener;
     {

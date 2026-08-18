@@ -209,6 +209,11 @@ std::string MakeRetroCorgiAnalogParam(std::string_view control) {
     return param.Serialize();
 }
 
+std::string MakeRetroCorgiTouchParam() {
+    Common::ParamPackage param{{"engine", "retrocorgi_ipc"}};
+    return param.Serialize();
+}
+
 void ApplyHeadlessRetroCorgiInputDefaults() {
     const char* ipc_port = std::getenv("RETROCORGI_AZAHAR_IPC_PORT");
     if (ipc_port == nullptr || *ipc_port == '\0' || IsEmptyOrWhitespace(ipc_port)) {
@@ -235,10 +240,13 @@ void ApplyHeadlessRetroCorgiInputDefaults() {
     set_button(Settings::NativeButton::Y, "y");
     set_button(Settings::NativeButton::L, "l");
     set_button(Settings::NativeButton::R, "r");
+    set_button(Settings::NativeButton::ZL, "zl");
+    set_button(Settings::NativeButton::ZR, "zr");
     set_button(Settings::NativeButton::Select, "select");
     set_button(Settings::NativeButton::Start, "start");
     set_analog(Settings::NativeAnalog::CirclePad, "circlepad");
     set_analog(Settings::NativeAnalog::CStick, "cstick");
+    profile.touch_device = MakeRetroCorgiTouchParam();
 }
 
 } // namespace
