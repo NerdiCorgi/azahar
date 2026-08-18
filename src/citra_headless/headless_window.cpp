@@ -78,15 +78,27 @@ HeadlessWindow::HeadlessWindow(
     }
 }
 
+void HeadlessWindow::SetSuppressRawVideoCapture(bool suppress) {
+    suppress_raw_video_capture = suppress;
+}
+
+void HeadlessWindow::OnStateRestoreComplete() {
+    last_raw_video_frame = -1;
+    last_raw_video_frame_write_time.reset();
+}
+
 void HeadlessWindow::PollEvents() {
     ProcessConfigurationChanges();
+    if (suppress_raw_video_capture) {
+        return;
+    }
     MaybeWriteRawVideoFrame();
 }
 
 void HeadlessWindow::SwapBuffers() {}
 
 void HeadlessWindow::MaybeWriteRawVideoFrame() {
-    if (!raw_video_stdout_enabled) {
+    if (!raw_video_stdout_enabled || suppress_raw_video_capture) {
         return;
     }
 

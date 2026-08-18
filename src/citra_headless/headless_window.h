@@ -17,6 +17,8 @@ public:
                                 std::nullopt);
     ~HeadlessWindow() override = default;
 
+    void SetSuppressRawVideoCapture(bool suppress);
+    void OnStateRestoreComplete();
     void PollEvents() override;
     void SwapBuffers() override;
 
@@ -25,9 +27,10 @@ private:
     void OnMinimalClientAreaChangeRequest(std::pair<u32, u32> minimal_size) override;
 
     bool raw_video_stdout_enabled{};
+    bool suppress_raw_video_capture{};
     std::optional<std::chrono::steady_clock::duration> raw_video_frame_period;
     std::optional<std::chrono::steady_clock::time_point> last_raw_video_frame_write_time;
-    s32 last_raw_video_frame = 0;
+    s32 last_raw_video_frame = -1;
     std::vector<u8> rgba_frame;
     std::vector<u8> yuv_frame;
 };

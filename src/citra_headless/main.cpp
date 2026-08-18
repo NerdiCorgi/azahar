@@ -353,7 +353,7 @@ void WriteRequiredFile(const std::string& path, const std::vector<u8>& buffer) {
     }
 }
 
-void ProcessRetroCorgiStateRequest(Core::System& system) {
+void ProcessRetroCorgiStateRequest(Core::System& system, HeadlessWindow& window) {
     const auto request = InputCommon::PopRetroCorgiIPCRequest();
     if (!request.has_value()) {
         return;
@@ -380,11 +380,15 @@ void ProcessRetroCorgiStateRequest(Core::System& system) {
 
         auto buffer = ReadRequiredFile(request->path);
         const auto bytes = buffer.size();
+        window.SetSuppressRawVideoCapture(true);
+        SCOPE_EXIT({ window.SetSuppressRawVideoCapture(false); });
         if (!system.LoadStateBuffer(std::move(buffer))) {
             const auto& details = system.GetStatusDetails();
             throw std::runtime_error(details.empty() ? "Native load-state operation failed"
                                                      : details);
         }
+        window.OnStateRestoreComplete();
+        system.frame_limiter.AdvanceFrame();
         InputCommon::CompleteRetroCorgiIPCRequest(*request, true, bytes,
                                                   "load-state completed");
     } catch (const std::exception& exception) {
@@ -565,7 +569,7 @@ int main(int argc, char* argv[]) {
 
     while (!deadline.has_value() || std::chrono::steady_clock::now() < *deadline) {
         window.PollEvents();
-        ProcessRetroCorgiStateRequest(system);
+        ProcessRetroCorgiStateRequest(system, window);
         const auto result = system.RunLoop();
         if (result == Core::System::ResultStatus::Success) {
             continue;
