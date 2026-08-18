@@ -378,6 +378,7 @@ std::optional<PendingRetroCorgiStateRequest> BeginRetroCorgiStateRequest(Core::S
             if (!system.SendSignal(Core::System::Signal::Save, RetroCorgiNativeSaveStateSlot)) {
                 throw std::runtime_error("Could not queue native save-state operation");
             }
+            system.frame_limiter.AdvanceFrame();
             return PendingRetroCorgiStateRequest{*request, native_path};
         }
 
@@ -388,6 +389,7 @@ std::optional<PendingRetroCorgiStateRequest> BeginRetroCorgiStateRequest(Core::S
         if (!system.SendSignal(Core::System::Signal::Load, RetroCorgiNativeSaveStateSlot)) {
             throw std::runtime_error("Could not queue native load-state operation");
         }
+        system.frame_limiter.AdvanceFrame();
         return PendingRetroCorgiStateRequest{*request, native_path};
     } catch (const std::exception& exception) {
         InputCommon::CompleteRetroCorgiIPCRequest(*request, false, 0, exception.what());
