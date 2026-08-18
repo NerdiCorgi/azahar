@@ -216,33 +216,29 @@ void ApplyHeadlessRetroCorgiInputDefaults() {
     }
 
     auto& profile = Settings::values.current_input_profile;
-    const auto set_button_if_empty = [&profile](Settings::NativeButton::Values button,
-                                                std::string_view control) {
-        if (profile.buttons[button].empty()) {
-            profile.buttons[button] = MakeRetroCorgiButtonParam(control);
-        }
+    const auto set_button = [&profile](Settings::NativeButton::Values button,
+                                       std::string_view control) {
+        profile.buttons[button] = MakeRetroCorgiButtonParam(control);
     };
-    const auto set_analog_if_empty = [&profile](Settings::NativeAnalog::Values analog,
-                                                std::string_view control) {
-        if (profile.analogs[analog].empty()) {
-            profile.analogs[analog] = MakeRetroCorgiAnalogParam(control);
-        }
+    const auto set_analog = [&profile](Settings::NativeAnalog::Values analog,
+                                       std::string_view control) {
+        profile.analogs[analog] = MakeRetroCorgiAnalogParam(control);
     };
 
-    set_button_if_empty(Settings::NativeButton::Up, "dpad_up");
-    set_button_if_empty(Settings::NativeButton::Down, "dpad_down");
-    set_button_if_empty(Settings::NativeButton::Left, "dpad_left");
-    set_button_if_empty(Settings::NativeButton::Right, "dpad_right");
-    set_button_if_empty(Settings::NativeButton::A, "a");
-    set_button_if_empty(Settings::NativeButton::B, "b");
-    set_button_if_empty(Settings::NativeButton::X, "x");
-    set_button_if_empty(Settings::NativeButton::Y, "y");
-    set_button_if_empty(Settings::NativeButton::L, "l");
-    set_button_if_empty(Settings::NativeButton::R, "r");
-    set_button_if_empty(Settings::NativeButton::Select, "select");
-    set_button_if_empty(Settings::NativeButton::Start, "start");
-    set_analog_if_empty(Settings::NativeAnalog::CirclePad, "circlepad");
-    set_analog_if_empty(Settings::NativeAnalog::CStick, "cstick");
+    set_button(Settings::NativeButton::Up, "dpad_up");
+    set_button(Settings::NativeButton::Down, "dpad_down");
+    set_button(Settings::NativeButton::Left, "dpad_left");
+    set_button(Settings::NativeButton::Right, "dpad_right");
+    set_button(Settings::NativeButton::A, "a");
+    set_button(Settings::NativeButton::B, "b");
+    set_button(Settings::NativeButton::X, "x");
+    set_button(Settings::NativeButton::Y, "y");
+    set_button(Settings::NativeButton::L, "l");
+    set_button(Settings::NativeButton::R, "r");
+    set_button(Settings::NativeButton::Select, "select");
+    set_button(Settings::NativeButton::Start, "start");
+    set_analog(Settings::NativeAnalog::CirclePad, "circlepad");
+    set_analog(Settings::NativeAnalog::CStick, "cstick");
 }
 
 } // namespace
