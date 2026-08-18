@@ -44,15 +44,17 @@ enum class New3dsMode {
 
 void PrintUsage(const char* program_name) {
     std::cerr << "Usage: " << program_name
-	     	      << " <rom-path> [--seconds <n>] [--user-dir <path>] [--new-3ds <old|new|auto>]"
-		         " [--raw-video-stdout] [--raw-video-fps <n>] [--audio-tcp-port <port>]\n"
+              << " <rom-path> [--seconds <n>] [--user-dir <path>] [--new-3ds <old|new|auto>]"
+                 " [--raw-video-stdout] [--raw-video-fps <n>] [--audio-tcp-port <port>]"
+                 " [--ipc-port <port>]\n"
               << "  --user-dir <path>         Use the specified Azahar user directory\n"
               << "  --new-3ds <old|new|auto>  Set system mode before loading the ROM\n"
               << "                             auto keeps the existing setting\n"
               << "  --renderer <backend>     Use software or Vulkan rendering (default: software)\n"
               << "  --raw-video-stdout        Write composed 400x480 yuv420p frames to stdout\n"
               << "  --raw-video-fps <n>       Cap raw video stdout to 1..60 frames per second\n"
-              << "  --audio-tcp-port <port>   Stream PCM16 stereo audio on 127.0.0.1:<port>\n";
+              << "  --audio-tcp-port <port>   Stream PCM16 stereo audio on 127.0.0.1:<port>\n"
+              << "  --ipc-port <port>         Listen for RetroCorgi IPC on 127.0.0.1:<port>\n";
 }
 
 bool ParseBoundedRun(int argc, char* argv[], int& index,
@@ -155,6 +157,25 @@ bool ParseAudioTcpPort(int argc, char* argv[], int& index, std::optional<u16>& a
     return true;
 }
 
+bool ParseIpcPort(int argc, char* argv[], int& index, std::optional<u16>& ipc_port) {
+    if (std::string_view(argv[index]) != "--ipc-port") {
+        return true;
+    }
+    if (index + 1 >= argc) {
+        return false;
+    }
+
+    char* end = nullptr;
+    const unsigned long port = std::strtoul(argv[index + 1], &end, 10);
+    if (end == argv[index + 1] || *end != '\0' || port < 1UL || port > 65535UL) {
+        return false;
+    }
+
+    ipc_port = static_cast<u16>(port);
+    ++index;
+    return true;
+}
+
 bool ParseRawVideoFps(int argc, char* argv[], int& index, std::optional<int>& raw_video_fps) {
     if (std::string_view(argv[index]) != "--raw-video-fps") {
         return true;
@@ -200,35 +221,54 @@ int PrintCoreError(Core::System::ResultStatus status, const Core::System& system
     return 1;
 }
 
-std::string MakeRetroCorgiButtonParam(std::string_view control) {
-    Common::ParamPackage param{{"engine", "retrocorgi_ipc"}, {"control", std::string{control}}};
+std::string MakeRetroCorgiButtonParam(std::string_view control, u16 port) {
+    Common::ParamPackage param{{"engine", "retrocorgi_ipc"},
+                               {"control", std::string{control}},
+                               {"port", static_cast<int>(port)}};
     return param.Serialize();
 }
 
-std::string MakeRetroCorgiAnalogParam(std::string_view control) {
-    Common::ParamPackage param{{"engine", "retrocorgi_ipc"}, {"control", std::string{control}}};
+std::string MakeRetroCorgiAnalogParam(std::string_view control, u16 port) {
+    Common::ParamPackage param{{"engine", "retrocorgi_ipc"},
+                               {"control", std::string{control}},
+                               {"port", static_cast<int>(port)}};
     return param.Serialize();
 }
 
-std::string MakeRetroCorgiTouchParam() {
-    Common::ParamPackage param{{"engine", "retrocorgi_ipc"}};
+std::string MakeRetroCorgiTouchParam(u16 port) {
+    Common::ParamPackage param{{"engine", "retrocorgi_ipc"}, {"port", static_cast<int>(port)}};
     return param.Serialize();
 }
 
-void ApplyHeadlessRetroCorgiInputDefaults() {
+std::optional<u16> GetRetroCorgiEnvIpcPort() {
     const char* ipc_port = std::getenv("RETROCORGI_AZAHAR_IPC_PORT");
     if (ipc_port == nullptr || *ipc_port == '\0' || IsEmptyOrWhitespace(ipc_port)) {
+        return std::nullopt;
+    }
+
+    char* end = nullptr;
+    const unsigned long port = std::strtoul(ipc_port, &end, 10);
+    if (end == ipc_port || *end != '\0' || port < 1UL || port > 65535UL) {
+        return std::nullopt;
+    }
+
+    return static_cast<u16>(port);
+}
+
+void ApplyHeadlessRetroCorgiInputDefaults(std::optional<u16> ipc_port) {
+    const auto resolved_ipc_port = ipc_port.has_value() ? ipc_port : GetRetroCorgiEnvIpcPort();
+    if (!resolved_ipc_port.has_value()) {
         return;
     }
 
     auto& profile = Settings::values.current_input_profile;
-    const auto set_button = [&profile](Settings::NativeButton::Values button,
-                                       std::string_view control) {
-        profile.buttons[button] = MakeRetroCorgiButtonParam(control);
+    const auto set_button = [&profile, &resolved_ipc_port](Settings::NativeButton::Values button,
+                                                           std::string_view control) {
+        profile.buttons[button] = MakeRetroCorgiButtonParam(control, *resolved_ipc_port);
     };
-    const auto set_analog = [&profile](Settings::NativeAnalog::Values analog,
-                                       std::string_view control) {
-        profile.analogs[analog] = MakeRetroCorgiAnalogParam(control);
+    const auto set_analog = [&profile, &resolved_ipc_port](Settings::NativeAnalog::Values analog,
+                                                           std::string_view control) {
+        profile.analogs[analog] = MakeRetroCorgiAnalogParam(control, *resolved_ipc_port);
     };
 
     set_button(Settings::NativeButton::Up, "dpad_up");
@@ -247,7 +287,7 @@ void ApplyHeadlessRetroCorgiInputDefaults() {
     set_button(Settings::NativeButton::Start, "start");
     set_analog(Settings::NativeAnalog::CirclePad, "circlepad");
     set_analog(Settings::NativeAnalog::CStick, "cstick");
-    profile.touch_device = MakeRetroCorgiTouchParam();
+    profile.touch_device = MakeRetroCorgiTouchParam(*resolved_ipc_port);
 }
 
 bool WaitForAsyncOperationsToDrain(Core::System& system) {
@@ -356,6 +396,7 @@ int main(int argc, char* argv[]) {
     std::optional<std::chrono::seconds> run_for;
     std::optional<std::string> user_dir;
     std::optional<u16> audio_tcp_port;
+    std::optional<u16> ipc_port;
     std::optional<int> raw_video_fps;
     New3dsMode new_3ds_mode = New3dsMode::Auto;
     Settings::GraphicsAPI graphics_api = Settings::GraphicsAPI::Software;
@@ -408,6 +449,14 @@ int main(int argc, char* argv[]) {
 
         if (std::string_view(argv[i]) == "--audio-tcp-port") {
             if (!ParseAudioTcpPort(argc, argv, i, audio_tcp_port)) {
+                PrintUsage(argv[0]);
+                return 1;
+            }
+            continue;
+        }
+
+        if (std::string_view(argv[i]) == "--ipc-port") {
+            if (!ParseIpcPort(argc, argv, i, ipc_port)) {
                 PrintUsage(argv[0]);
                 return 1;
             }
@@ -467,7 +516,7 @@ int main(int argc, char* argv[]) {
     }
 
     InputCommon::Init();
-    ApplyHeadlessRetroCorgiInputDefaults();
+    ApplyHeadlessRetroCorgiInputDefaults(ipc_port);
 
     auto& system = Core::System::GetInstance();
     HeadlessWindow window{
