@@ -1179,6 +1179,11 @@ void RendererVulkan::SwapBuffers() {
     EndFrame();
 }
 
+bool RendererVulkan::TryCaptureFrameRGBA([[maybe_unused]] const Layout::FramebufferLayout& layout,
+                                         std::vector<u8>& out) {
+    return main_present_window.CaptureRGBA(out);
+}
+
 void RendererVulkan::RenderScreenshot() {
     if (!settings.screenshot_requested.exchange(false)) {
         return;

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include "common/polyfill_thread.h"
@@ -60,17 +61,23 @@ public:
     }
 
     u32 ImageCount() const noexcept {
-        return swapchain.GetImageCount();
+        return static_cast<u32>(swap_chain.size());
     }
 
     vk::Format GetSurfaceFormat() const noexcept {
-        return swapchain.GetSurfaceFormat().format;
+        return output_format;
     }
+
+    bool CaptureRGBA(std::vector<u8>& out);
 
 private:
     void PresentThread(std::stop_token token);
 
-    void CopyToSwapchain(Frame* frame);
+    void CopyToPresentTarget(Frame* frame);
+
+    void CreateOffscreenTarget(u32 width, u32 height);
+
+    void DestroyOffscreenTarget();
 
     vk::RenderPass CreateRenderpass();
 
@@ -79,9 +86,10 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     bool low_refresh_rate;
+    bool use_offscreen_target;
     vk::SurfaceKHR surface;
     vk::SurfaceKHR next_surface{};
-    Swapchain swapchain;
+    std::unique_ptr<Swapchain> swapchain;
     vk::CommandPool command_pool;
     vk::Queue graphics_queue;
     vk::RenderPass present_renderpass;
@@ -100,6 +108,13 @@ private:
     bool blit_supported;
     bool use_present_thread{true};
     void* last_render_surface{};
+    vk::Image output_image{};
+    vk::ImageView output_image_view{};
+    VmaAllocation output_allocation{};
+    vk::Format output_format{vk::Format::eR8G8B8A8Unorm};
+    u32 output_width{};
+    u32 output_height{};
+    bool output_image_initialized{};
 };
 
 } // namespace Vulkan

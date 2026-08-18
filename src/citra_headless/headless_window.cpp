@@ -6,53 +6,18 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <cstring>
-
 #include "core/core.h"
 #include "video_core/gpu.h"
-#include "video_core/renderer_software/renderer_software.h"
-
+#include "video_core/renderer_base.h"
 namespace {
 
 constexpr u32 OutputWidth = 400;
 constexpr u32 OutputHeight = 480;
-constexpr u32 TopScreenHeight = 240;
-constexpr u32 BottomScreenX = 40;
 constexpr size_t RgbaFrameBytes = static_cast<size_t>(OutputWidth) * OutputHeight * 4;
 constexpr size_t YuvFrameBytes = static_cast<size_t>(OutputWidth) * OutputHeight * 3 / 2;
 
 u8 ClampToByte(int value) {
     return static_cast<u8>(std::clamp(value, 0, 255));
-}
-
-void WritePixel(std::vector<u8>& rgba_frame, u32 x, u32 y, const u8* rgba) {
-    const size_t offset = (static_cast<size_t>(y) * OutputWidth + x) * 4;
-    std::memcpy(rgba_frame.data() + offset, rgba, 4);
-}
-
-void BlitScreen(std::vector<u8>& rgba_frame, const SwRenderer::ScreenInfo& info, u32 dst_x,
-                u32 dst_y, u32 dst_width, u32 dst_height) {
-    if (info.pixels.empty() || info.width == 0 || info.height == 0 || dst_width == 0 ||
-        dst_height == 0 || dst_x >= OutputWidth || dst_y >= OutputHeight) {
-        return;
-    }
-
-    const u32 blit_width = std::min(dst_width, OutputWidth - dst_x);
-    const u32 blit_height = std::min(dst_height, OutputHeight - dst_y);
-    const u32 native_width = info.height;
-    const u32 native_height = info.width;
-
-    for (u32 y = 0; y < blit_height; ++y) {
-        const u32 src_y = static_cast<u32>((static_cast<u64>(y) * native_height) / blit_height);
-        for (u32 x = 0; x < blit_width; ++x) {
-            const u32 src_x = static_cast<u32>((static_cast<u64>(x) * native_width) / blit_width);
-            const size_t src_offset = (static_cast<size_t>(src_y) * info.height + src_x) * 4;
-            if (src_offset + 3 >= info.pixels.size()) {
-                continue;
-            }
-            WritePixel(rgba_frame, dst_x + x, dst_y + y, info.pixels.data() + src_offset);
-        }
-    }
 }
 
 void ConvertRgbaToYuv420p(const std::vector<u8>& rgba_frame, std::vector<u8>& yuv_frame) {
@@ -139,17 +104,10 @@ void HeadlessWindow::MaybeWriteRawVideoFrame() {
         return;
     }
 
-    const auto& renderer = static_cast<const SwRenderer::RendererSoftware&>(renderer_base);
-
-    std::fill(rgba_frame.begin(), rgba_frame.end(), 0);
-    for (size_t i = 3; i < rgba_frame.size(); i += 4) {
-        rgba_frame[i] = 255;
+    if (!renderer_base.TryCaptureFrameRGBA(GetFramebufferLayout(), rgba_frame)) {
+        return;
     }
 
-    BlitScreen(rgba_frame, renderer.Screen(VideoCore::ScreenId::TopLeft), 0, 0, OutputWidth,
-               TopScreenHeight);
-    BlitScreen(rgba_frame, renderer.Screen(VideoCore::ScreenId::Bottom), BottomScreenX,
-               TopScreenHeight, 320, 240);
     ConvertRgbaToYuv420p(rgba_frame, yuv_frame);
 
     if (std::fwrite(yuv_frame.data(), 1, yuv_frame.size(), stdout) != yuv_frame.size() ||

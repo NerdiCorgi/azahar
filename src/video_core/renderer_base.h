@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "common/common_types.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "video_core/rasterizer_interface.h"
@@ -52,6 +54,12 @@ public:
     virtual void TryPresent(int timeout_ms, bool is_secondary) = 0;
     virtual void TryPresent(int timeout_ms) {
         TryPresent(timeout_ms, false);
+    }
+
+    /// Captures the latest presented frame as RGBA8 into out.
+    virtual bool TryCaptureFrameRGBA(const Layout::FramebufferLayout& layout,
+                                     std::vector<u8>& out) {
+        return false;
     }
 
     /// Prepares for video dumping (e.g. create necessary buffers, etc)

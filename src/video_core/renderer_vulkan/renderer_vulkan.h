@@ -82,6 +82,8 @@ public:
 
     void SwapBuffers() override;
     void TryPresent(int timeout_ms, bool is_secondary) override {}
+    bool TryCaptureFrameRGBA(const Layout::FramebufferLayout& layout,
+                             std::vector<u8>& out) override;
 
 private:
     void ReloadPipeline(Settings::StereoRenderOption render_3d);
